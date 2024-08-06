@@ -26,6 +26,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <lib/core/CHIPSafeCasts.h>
 #include <lib/dnssd/Advertiser.h>
 #include <lib/dnssd/Resolver.h>
 #include <lib/support/BytesToHex.h>
@@ -49,9 +50,11 @@ bool IsKey(const ByteSpan & key, const char * desired)
     {
         return false;
     }
+
+    auto desired_bytes = Uint8::from_const_char(desired);
     for (size_t i = 0; i < key.size(); ++i)
     {
-        if (SafeToLower(key.data()[i]) != SafeToLower(desired[i]))
+        if (SafeToLower(key.data()[i]) != SafeToLower(desired_bytes[i]))
         {
             return false;
         }
@@ -104,8 +107,8 @@ bool MakeBoolFromAsciiDecimal(const ByteSpan & val)
 
 size_t GetPlusSignIdx(const ByteSpan & value)
 {
-    // Fist value is the vendor id, second (after the +) is the product.
-    for (int i = 0; i < static_cast<int>(value.size()); ++i)
+    // First value is the vendor id, second (after the +) is the product.
+    for (size_t i = 0; i < value.size(); ++i)
     {
         if (static_cast<char>(value.data()[i]) == '+')
         {
@@ -181,6 +184,18 @@ Optional<System::Clock::Milliseconds32> GetRetryInterval(const ByteSpan & value)
     return NullOptional;
 }
 
+Optional<System::Clock::Milliseconds16> GetRetryActiveThreshold(const ByteSpan & value)
+{
+    const auto retryInterval = MakeU16FromAsciiDecimal(value);
+
+    if (retryInterval == 0)
+    {
+        return NullOptional;
+    }
+
+    return MakeOptional(System::Clock::Milliseconds16(retryInterval));
+}
+
 TxtFieldKey GetTxtFieldKey(const ByteSpan & key)
 {
     for (auto & info : txtFieldInfo)
@@ -234,11 +249,14 @@ void FillNodeDataFromTxt(const ByteSpan & key, const ByteSpan & value, CommonRes
 {
     switch (Internal::GetTxtFieldKey(key))
     {
-    case TxtFieldKey::kSleepyIdleInterval:
+    case TxtFieldKey::kSessionIdleInterval:
         nodeData.mrpRetryIntervalIdle = Internal::GetRetryInterval(value);
         break;
-    case TxtFieldKey::kSleepyActiveInterval:
+    case TxtFieldKey::kSessionActiveInterval:
         nodeData.mrpRetryIntervalActive = Internal::GetRetryInterval(value);
+        break;
+    case TxtFieldKey::kSessionActiveThreshold:
+        nodeData.mrpRetryActiveThreshold = Internal::GetRetryActiveThreshold(value);
         break;
     case TxtFieldKey::kTcpSupported:
         nodeData.supportsTcp = Internal::MakeBoolFromAsciiDecimal(value);

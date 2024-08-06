@@ -45,6 +45,8 @@
 #include <wiced_platform.h>
 #include <wiced_rtos.h>
 
+#include "system.h"
+
 #define UART_RX_BUFFER_SIZE (512)
 
 #ifdef CLI_COMMAND_SEPARATOR
@@ -96,7 +98,7 @@ static uart_cb_t uart_cb = {0};
 void otPlatUartInit(void)
 {
     /* Get/Register the application thread event code. */
-    if (!wiced_platform_application_thread_event_register(&uart_cb.event_code, uart_rx_data_handler))
+    if (!system_event_register(&uart_cb.event_code, uart_rx_data_handler))
     {
         printf("%s: Fail to get event code.\n", __FUNCTION__);
         return;
@@ -135,10 +137,7 @@ otError otPlatUartEnable(void)
     return OT_ERROR_NONE;
 }
 
-otError otPlatUartDisable(void)
-{
-    return OT_ERROR_NOT_IMPLEMENTED;
-}
+otError otPlatUartDisable(void) { return OT_ERROR_NOT_IMPLEMENTED; }
 
 otError otPlatUartSend(const uint8_t *aBuf, uint16_t aBufLength)
 {
@@ -153,10 +152,7 @@ otError otPlatUartSend(const uint8_t *aBuf, uint16_t aBufLength)
     return OT_ERROR_NONE;
 }
 
-otError otPlatUartFlush(void)
-{
-    return OT_ERROR_NOT_IMPLEMENTED;
-}
+otError otPlatUartFlush(void) { return OT_ERROR_NOT_IMPLEMENTED; }
 
 //------------------------------ Static Function --------------------------------------------------
 
@@ -173,7 +169,7 @@ static void uart_rx_interrupt(void *arg)
         uart_rx_data_put(data);
     }
 
-    wiced_platform_application_thread_event_set(uart_cb.event_code);
+    system_event_set(uart_cb.event_code);
 
     wiced_rtos_unlock_mutex(uart_cb.rx.p_mutex);
 

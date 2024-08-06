@@ -176,12 +176,13 @@ CHIP_ERROR ConnectivityManagerImpl::_GetAndLogWiFiStatsCounters(void)
 {
     cy_wcm_associated_ap_info_t ap_info;
     cy_rslt_t result = CY_RSLT_SUCCESS;
+    CHIP_ERROR err   = CHIP_NO_ERROR;
 
     result = cy_wcm_get_associated_ap_info(&ap_info);
     if (result != CY_RSLT_SUCCESS)
     {
         ChipLogError(DeviceLayer, "cy_wcm_get_associated_ap_info failed: %d", (int) result);
-        SuccessOrExit(CHIP_ERROR_INTERNAL);
+        SuccessOrExit(err = CHIP_ERROR_INTERNAL);
     }
 
     ChipLogProgress(DeviceLayer,
@@ -193,7 +194,7 @@ CHIP_ERROR ConnectivityManagerImpl::_GetAndLogWiFiStatsCounters(void)
                     ap_info.BSSID[0], ap_info.BSSID[1], ap_info.BSSID[2], ap_info.BSSID[3], ap_info.BSSID[4], ap_info.BSSID[5],
                     ap_info.signal_strength, ap_info.channel, ap_info.channel_width);
 exit:
-    return CHIP_NO_ERROR;
+    return err;
 }
 
 // ==================== ConnectivityManager Platform Internal Methods ====================
@@ -345,7 +346,7 @@ void ConnectivityManagerImpl::ChangeWiFiAPState(WiFiAPState newState)
     }
 }
 
-#define INITIALISER_IPV4_ADDRESS1(addr_var, addr_val) addr_var = { CY_WCM_IP_VER_V4, { .v4 = (uint32_t)(addr_val) } }
+#define INITIALISER_IPV4_ADDRESS1(addr_var, addr_val) addr_var = { CY_WCM_IP_VER_V4, { .v4 = (uint32_t) (addr_val) } }
 #define MAKE_IPV4_ADDRESS1(a, b, c, d) ((((uint32_t) d) << 24) | (((uint32_t) c) << 16) | (((uint32_t) b) << 8) | ((uint32_t) a))
 static const cy_wcm_ip_setting_t ap_mode_ip_settings = {
     INITIALISER_IPV4_ADDRESS1(.ip_address, MAKE_IPV4_ADDRESS1(192, 168, 0, 2)),

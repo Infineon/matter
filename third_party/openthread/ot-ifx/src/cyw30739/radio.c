@@ -47,6 +47,7 @@
 
 #include "i15dot4.h"
 #include "radio_wrapper.h"
+#include "system.h"
 
 #include <clock_timer.h>
 #include <hcidefs.h>
@@ -137,16 +138,16 @@
 
 typedef struct radio_i15dot4_mapping
 {
-    uint8_t                                          req_id;
-    uint8_t                                          rsp_id;
-    uint32_t                                         event_code;
-    wiced_platform_application_thread_event_handler *p_event_handler;
+    uint8_t                 req_id;
+    uint8_t                 rsp_id;
+    uint32_t                event_code;
+    system_event_handler_t *p_event_handler;
 } radio_i15dot4_mapping_t;
 
 typedef struct radio_data_wait_conf_entry
 {
     slist_node_t  node;
-    otInstance *  aInstance;
+    otInstance   *aInstance;
     otRadioFrame *aTxFrame;
 #if I15DOT4_VARAIABLE_ACK_LENGTH
     struct
@@ -174,7 +175,7 @@ typedef struct radio_data_received_frame
 typedef struct radio_csl_tx_element
 {
     slist_node_t  node;
-    otInstance *  aInstance;
+    otInstance   *aInstance;
     otRadioFrame *aTxFrame;
     wiced_timer_t timer;
 } radio_csl_tx_element_t;
@@ -225,7 +226,7 @@ typedef struct radio_cb
 
         struct
         {
-            otInstance * aInstance;
+            otInstance  *aInstance;
             slist_node_t frame_list; // refer to radio_data_received_frame_t
         } rx;
     } data;
@@ -275,7 +276,7 @@ typedef struct radio_cb
     {
         struct
         {
-            otInstance *     aInstance;
+            otInstance      *aInstance;
             uint8_t          aKeyIdMode;
             uint8_t          aKeyId;
             otMacKeyMaterial aKey;
@@ -311,7 +312,7 @@ static uint32_t      radio_i15dot4_application_thread_event_code_get(uint8_t i15
 static wiced_bool_t  radio_i15dot4_mcps_data_req_msdu_handle_get(uint8_t *p_msdu_handle);
 static void          radio_i15dot4_mcps_data_req_timeout_handler(WICED_TIMER_PARAM_TYPE cb_params);
 static slist_node_t *radio_i15dot4_mcps_data_req_wait_conf_add(uint8_t       msdu_handle,
-                                                               otInstance *  aInstance,
+                                                               otInstance   *aInstance,
                                                                otRadioFrame *aFrame);
 static void          radio_i15dot4_mcps_data_req_wait_conf_remove(slist_node_t *p_target, wiced_bool_t free);
 static void          radio_i15dot4_mlme_get_conf_data_reset(void);
@@ -331,8 +332,8 @@ static wiced_bool_t radio_i15dot4_mlme_scan_req(uint8_t  scan_type,
 static wiced_bool_t radio_i15dot4_mlme_set_req(uint8_t attribute_id, uint32_t attribute_len, uint8_t *p_attribute);
 static wiced_bool_t radio_i15dot4_thread_addr_match_req(ADDR_MATCH_ACTION_t action,
                                                         uint8_t             flag,
-                                                        I15DOT4_ADDR_t *    p_addr,
-                                                        uint8_t *           p_data,
+                                                        I15DOT4_ADDR_t     *p_addr,
+                                                        uint8_t            *p_data,
                                                         uint8_t             data_len);
 static void         radio_i15dot4_thread_data_conf_handler(void);
 static void         radio_i15dot4_thread_data_ind_handler(void);
@@ -415,7 +416,7 @@ void otPlatRadioPacketStatisticsGet(PACKET_STATISTICS_t *p_statistics)
  * @param[in]   aKeyType     Key Type used.
  *
  */
-void otPlatRadioSetMacKey(otInstance *            aInstance,
+void otPlatRadioSetMacKey(otInstance             *aInstance,
                           uint8_t                 aKeyIdMode,
                           uint8_t                 aKeyId,
                           const otMacKeyMaterial *aPrevKey,
@@ -1193,8 +1194,8 @@ void otPlatRadioInit(void)
     /* Get/Register the application thread event code. */
     for (i = 0; i < sizeof(radio_i15dot4_mapping_table) / sizeof(radio_i15dot4_mapping_t); i++)
     {
-        if (!wiced_platform_application_thread_event_register(&radio_i15dot4_mapping_table[i].event_code,
-                                                              radio_i15dot4_mapping_table[i].p_event_handler))
+        if (!system_event_register(&radio_i15dot4_mapping_table[i].event_code,
+                                   radio_i15dot4_mapping_table[i].p_event_handler))
         {
             RADIO_TRACE("%s: Fail to get event code for %d\n", __FUNCTION__, radio_i15dot4_mapping_table[i].req_id);
             return;
@@ -1235,8 +1236,7 @@ void otPlatRadioInit(void)
     }
 
     /* Get/Register the application thread event code for scheduled tx.. */
-    if (!wiced_platform_application_thread_event_register(&radio_cb.csl_tx.event_code,
-                                                          radio_csl_tx_queue_timeout_handler))
+    if (!system_event_register(&radio_cb.csl_tx.event_code, radio_csl_tx_queue_timeout_handler))
     {
         RADIO_TRACE("%s: Fail to get event code for schedlued tx.\n", __FUNCTION__);
         return;
@@ -1288,10 +1288,10 @@ void wiced_platform_epa_enable(void)
 #endif // WICED_PLATFORM_EPA && I15DOT4_TX_EPA
 
 #if OPENTHREAD_CONFIG_MLE_LINK_METRICS_SUBJECT_ENABLE
-otError otPlatRadioConfigureEnhAckProbing(otInstance *         aInstance,
+otError otPlatRadioConfigureEnhAckProbing(otInstance          *aInstance,
                                           otLinkMetrics        aLinkMetrics,
                                           const otShortAddress aShortAddress,
-                                          const otExtAddress * aExtAddress)
+                                          const otExtAddress  *aExtAddress)
 {
     otError error = OT_ERROR_NONE;
 
@@ -1615,7 +1615,7 @@ static void radio_csl_tx_waiting_queue_timeout_callback(WICED_TIMER_PARAM_TYPE c
             slist_add_tail(p_node, &radio_cb.csl_tx.fired_queue);
 
             /* Set an application thread event for this fired scheduled tx entry. */
-            wiced_platform_application_thread_event_set(radio_cb.csl_tx.event_code);
+            system_event_set(radio_cb.csl_tx.event_code);
 
             break;
         }
@@ -1632,7 +1632,7 @@ static void radio_csl_tx_waiting_queue_timeout_callback(WICED_TIMER_PARAM_TYPE c
 static void radio_csl_tx_queue_timeout_handler(void)
 {
     slist_node_t *p_node;
-    otInstance *  aInstance;
+    otInstance   *aInstance;
     otRadioFrame *aTxFrame;
 
     RADIO_TRACE("%s\n", __FUNCTION__);
@@ -1662,7 +1662,7 @@ static void radio_csl_tx_queue_timeout_handler(void)
     /* Set an application thread event if the fired queue is not empty. */
     if (slist_count(&radio_cb.csl_tx.fired_queue) > 0)
     {
-        wiced_platform_application_thread_event_set(radio_cb.csl_tx.event_code);
+        system_event_set(radio_cb.csl_tx.event_code);
     }
 }
 
@@ -1724,8 +1724,7 @@ static wiced_bool_t radio_i15dot4_mlme_set_req(uint8_t attribute_id, uint32_t at
                                (uint8_t *)&mlme_set_req);
 
     /* Wait for corresponding confirm message. */
-    wiced_platform_application_thread_event_wait(
-        radio_i15dot4_application_thread_event_code_get(I15DOT4_CMDID_MLME_SET_REQ));
+    system_event_wait(radio_i15dot4_application_thread_event_code_get(I15DOT4_CMDID_MLME_SET_REQ));
 
     return WICED_TRUE;
 }
@@ -1750,8 +1749,7 @@ static wiced_bool_t radio_i15dot4_mlme_reset_req(wiced_bool_t reset_pib)
     radio_hci_vsc_command_send(HCI_VSC_I15DOT4_META_OPCODE, sizeof(mlme_reset_req), (uint8_t *)&mlme_reset_req);
 
     /* Wait for corresponding confirm message. */
-    wiced_platform_application_thread_event_wait(
-        radio_i15dot4_application_thread_event_code_get(I15DOT4_CMDID_MLME_RESET_CONF));
+    system_event_wait(radio_i15dot4_application_thread_event_code_get(I15DOT4_CMDID_MLME_RESET_CONF));
 
     return WICED_TRUE;
 }
@@ -1776,8 +1774,7 @@ static wiced_bool_t radio_i15dot4_mlme_get_req(uint8_t attribute_id)
     radio_hci_vsc_command_send(HCI_VSC_I15DOT4_META_OPCODE, sizeof(mlme_get_req), (uint8_t *)&mlme_get_req);
 
     /* Wait for corresponding confirm message. */
-    wiced_platform_application_thread_event_wait(
-        radio_i15dot4_application_thread_event_code_get(I15DOT4_CMDID_MLME_GET_REQ));
+    system_event_wait(radio_i15dot4_application_thread_event_code_get(I15DOT4_CMDID_MLME_GET_REQ));
 
     return WICED_TRUE;
 }
@@ -1802,8 +1799,7 @@ static wiced_bool_t radio_i15dot4_mlme_rx_enable_req(wiced_bool_t defer_permit,
     radio_hci_vsc_command_send(HCI_VSC_I15DOT4_META_OPCODE, sizeof(mlme_rx_enable_req), (uint8_t *)&mlme_rx_enable_req);
 
     /* Wait for corresponding confirm message. */
-    wiced_platform_application_thread_event_wait(
-        radio_i15dot4_application_thread_event_code_get(I15DOT4_CMDID_MLME_RX_ENABLE_REQ));
+    system_event_wait(radio_i15dot4_application_thread_event_code_get(I15DOT4_CMDID_MLME_RX_ENABLE_REQ));
 
     return WICED_TRUE;
 }
@@ -1880,8 +1876,7 @@ static void radio_i15dot4_mcps_data_req_timeout_handler(WICED_TIMER_PARAM_TYPE c
     /* Set an event to application thread to process the timeout entry. */
     if (slist_count(&radio_cb.data.tx.confirmed_list))
     {
-        wiced_platform_application_thread_event_set(
-            radio_i15dot4_application_thread_event_code_get(I15DOT4_CMDID_MCPS_DATA_CONF));
+        system_event_set(radio_i15dot4_application_thread_event_code_get(I15DOT4_CMDID_MCPS_DATA_CONF));
     }
 }
 
@@ -1902,7 +1897,7 @@ static void radio_i15dot4_mcps_data_req_wait_conf_remove(slist_node_t *p_target,
  * Add a new entry to the MCPS-DATA.req primitive wait confirm list.
  */
 static slist_node_t *radio_i15dot4_mcps_data_req_wait_conf_add(uint8_t       msdu_handle,
-                                                               otInstance *  aInstance,
+                                                               otInstance   *aInstance,
                                                                otRadioFrame *aFrame)
 {
     slist_node_t *p_new;
@@ -2070,8 +2065,8 @@ static wiced_bool_t radio_i15dot4_thread_data_req(otRadioFrame *aFrame, uint8_t 
  */
 static wiced_bool_t radio_i15dot4_thread_addr_match_req(ADDR_MATCH_ACTION_t action,
                                                         uint8_t             flag,
-                                                        I15DOT4_ADDR_t *    p_addr,
-                                                        uint8_t *           p_data,
+                                                        I15DOT4_ADDR_t     *p_addr,
+                                                        uint8_t            *p_data,
                                                         uint8_t             data_len)
 {
     I15DOT4_THREAD_ADDR_MATCH_REQ_t thread_addr_match_req = {0};
@@ -2093,8 +2088,7 @@ static wiced_bool_t radio_i15dot4_thread_addr_match_req(ADDR_MATCH_ACTION_t acti
                                (uint8_t *)&thread_addr_match_req);
 
     /* Wait for corresponding confirm message. */
-    wiced_platform_application_thread_event_wait(
-        radio_i15dot4_application_thread_event_code_get(I15DOT4_CMDID_THREAD_ADDR_MATCH_REQ));
+    system_event_wait(radio_i15dot4_application_thread_event_code_get(I15DOT4_CMDID_THREAD_ADDR_MATCH_REQ));
 
     return WICED_TRUE;
 }
@@ -2118,8 +2112,7 @@ static void radio_i15dot4_mlme_scan_conf_timeout_handler(WICED_TIMER_PARAM_TYPE 
     {
     case I15DOT4_SCAN_TYPE_ED:
         /* Set an event to application thread. */
-        wiced_platform_application_thread_event_set(
-            radio_i15dot4_application_thread_event_code_get(I15DOT4_CMDID_MLME_SCAN_CONF));
+        system_event_set(radio_i15dot4_application_thread_event_code_get(I15DOT4_CMDID_MLME_SCAN_CONF));
         break;
 
     default:
@@ -2277,9 +2270,9 @@ static void radio_hci_vse_callback(uint8_t len, uint8_t *p)
  */
 static void radio_hci_vse_callback_thread_data_ind(uint8_t len, uint8_t *p)
 {
-    I15DOT4_THREAD_DATA_IND_t *  p_thread_data_ind;
+    I15DOT4_THREAD_DATA_IND_t   *p_thread_data_ind;
     radio_data_received_frame_t *p_rx_frame = NULL;
-    uint8_t *                    p_psdu     = NULL;
+    uint8_t                     *p_psdu     = NULL;
 
     /* Check data length. */
     if (len != sizeof(I15DOT4_THREAD_DATA_IND_t))
@@ -2344,8 +2337,7 @@ static void radio_hci_vse_callback_thread_data_ind(uint8_t len, uint8_t *p)
     slist_add_tail((slist_node_t *)p_rx_frame, &radio_cb.data.rx.frame_list);
 
     /* Set an event to application thread to process the entry. */
-    wiced_platform_application_thread_event_set(
-        radio_i15dot4_application_thread_event_code_get(I15DOT4_CMDID_THREAD_DATA_IND));
+    system_event_set(radio_i15dot4_application_thread_event_code_get(I15DOT4_CMDID_THREAD_DATA_IND));
 }
 
 /*
@@ -2355,7 +2347,7 @@ static void radio_hci_vse_callback_thread_data_conf(uint8_t len, uint8_t *p)
 {
     I15DOT4_THREAD_DATA_CONF_t *p_thread_data_conf;
     int                         i;
-    slist_node_t *              p_node;
+    slist_node_t               *p_node;
 #if !I15DOT4_VARAIABLE_ACK_LENGTH
     I15DOT4_FRAME_CTRL_t *p_frame_ctrl;
 #endif // !I15DOT4_VARAIABLE_ACK_LENGTH
@@ -2444,8 +2436,7 @@ static void radio_hci_vse_callback_thread_data_conf(uint8_t len, uint8_t *p)
     /* Set an event to application thread to process the entry. */
     if (slist_count(&radio_cb.data.tx.confirmed_list))
     {
-        wiced_platform_application_thread_event_set(
-            radio_i15dot4_application_thread_event_code_get(I15DOT4_CMDID_THREAD_DATA_CONF));
+        system_event_set(radio_i15dot4_application_thread_event_code_get(I15DOT4_CMDID_THREAD_DATA_CONF));
     }
 }
 
@@ -2467,8 +2458,7 @@ static void radio_hci_vse_callback_thread_addr_match_conf(uint8_t len, uint8_t *
 
     RADIO_TRACE("%s (%d)\n", __FUNCTION__, p_thread_addr_match_conf->status);
 
-    wiced_platform_application_thread_event_set(
-        radio_i15dot4_application_thread_event_code_get(I15DOT4_CMDID_THREAD_ADDR_MATCH_CONF));
+    system_event_set(radio_i15dot4_application_thread_event_code_get(I15DOT4_CMDID_THREAD_ADDR_MATCH_CONF));
 }
 
 /*
@@ -2524,8 +2514,7 @@ static void radio_hci_vse_callback_mlme_scan_conf(uint8_t len, uint8_t *p)
 exit:
 
     /* Set an event to application thread. */
-    wiced_platform_application_thread_event_set(
-        radio_i15dot4_application_thread_event_code_get(I15DOT4_CMDID_MLME_SCAN_CONF));
+    system_event_set(radio_i15dot4_application_thread_event_code_get(I15DOT4_CMDID_MLME_SCAN_CONF));
 }
 
 /*
@@ -2550,8 +2539,7 @@ static void radio_hci_vse_callback_mlme_rx_enable_conf(uint8_t len, uint8_t *p)
         radio_cb.radio_state.current = radio_cb.radio_state.next;
     }
 
-    wiced_platform_application_thread_event_set(
-        radio_i15dot4_application_thread_event_code_get(I15DOT4_CMDID_MLME_RX_ENABLE_CONF));
+    system_event_set(radio_i15dot4_application_thread_event_code_get(I15DOT4_CMDID_MLME_RX_ENABLE_CONF));
 }
 
 /*
@@ -2572,8 +2560,7 @@ static void radio_hci_vse_callback_mlme_set_conf(uint8_t len, uint8_t *p)
 
     RADIO_TRACE("%s (0x%02X, %d)\n", __FUNCTION__, p_mlme_set_conf->attrib_id, p_mlme_set_conf->status);
 
-    wiced_platform_application_thread_event_set(
-        radio_i15dot4_application_thread_event_code_get(I15DOT4_CMDID_MLME_SET_CONF));
+    system_event_set(radio_i15dot4_application_thread_event_code_get(I15DOT4_CMDID_MLME_SET_CONF));
 }
 
 /*
@@ -2615,8 +2602,7 @@ static void radio_hci_vse_callback_mlme_get_conf(uint8_t len, uint8_t *p)
     }
 
     /* Set application thread event to unblock the application thread. */
-    wiced_platform_application_thread_event_set(
-        radio_i15dot4_application_thread_event_code_get(I15DOT4_CMDID_MLME_GET_CONF));
+    system_event_set(radio_i15dot4_application_thread_event_code_get(I15DOT4_CMDID_MLME_GET_CONF));
 }
 
 #if I15DOT4_TX_SCHEDULE_ENABLE
@@ -2635,8 +2621,7 @@ static void radio_hci_vse_callback_mlme_reset_conf(uint8_t len, uint8_t *p)
     }
 
     /* Set application thread event to unblock the application thread. */
-    wiced_platform_application_thread_event_set(
-        radio_i15dot4_application_thread_event_code_get(I15DOT4_CMDID_MLME_RESET_CONF));
+    system_event_set(radio_i15dot4_application_thread_event_code_get(I15DOT4_CMDID_MLME_RESET_CONF));
 }
 
 #endif
@@ -2754,8 +2739,7 @@ static void radio_i15dot4_thread_data_conf_handler(void)
     /* Set an event to application thread to process the queued confirmed entry. */
     if (slist_count(&radio_cb.data.tx.confirmed_list))
     {
-        wiced_platform_application_thread_event_set(
-            radio_i15dot4_application_thread_event_code_get(I15DOT4_CMDID_THREAD_DATA_CONF));
+        system_event_set(radio_i15dot4_application_thread_event_code_get(I15DOT4_CMDID_THREAD_DATA_CONF));
     }
 }
 
@@ -2796,8 +2780,7 @@ static void radio_i15dot4_thread_data_ind_handler(void)
     /* Set an application thread event to process the queued received frames. */
     if (slist_count(&radio_cb.data.rx.frame_list))
     {
-        wiced_platform_application_thread_event_set(
-            radio_i15dot4_application_thread_event_code_get(I15DOT4_CMDID_THREAD_DATA_IND));
+        system_event_set(radio_i15dot4_application_thread_event_code_get(I15DOT4_CMDID_THREAD_DATA_IND));
     }
 }
 
@@ -2965,15 +2948,9 @@ static void radio_utils_data_display(uint8_t data_len, uint8_t *p_data)
     OT_UNUSED_VARIABLE(p_data);
 }
 
-static void radio_utils_data_display_uint64(uint64_t num)
-{
-    OT_UNUSED_VARIABLE(num);
-}
+static void radio_utils_data_display_uint64(uint64_t num) { OT_UNUSED_VARIABLE(num); }
 
-static void radio_utils_data_display_xtAddress(const otExtAddress *aExtAddress)
-{
-    OT_UNUSED_VARIABLE(aExtAddress);
-}
+static void radio_utils_data_display_xtAddress(const otExtAddress *aExtAddress) { OT_UNUSED_VARIABLE(aExtAddress); }
 
 static void radio_utils_radio_frame_display(otRadioFrame *p_frame, wiced_bool_t tx)
 {

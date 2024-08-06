@@ -181,11 +181,12 @@ public:
 
     // Service advertiser
     CHIP_ERROR Init(chip::Inet::EndPointManager<chip::Inet::UDPEndPoint> * udpEndPointManager) override;
+    bool IsInitialized() override { return mIsInitialized; }
     void Shutdown() override;
     CHIP_ERROR RemoveServices() override;
     CHIP_ERROR Advertise(const OperationalAdvertisingParameters & params) override;
     CHIP_ERROR Advertise(const CommissionAdvertisingParameters & params) override;
-    CHIP_ERROR FinalizeServiceUpdate() override { return CHIP_NO_ERROR; }
+    CHIP_ERROR FinalizeServiceUpdate() override;
     CHIP_ERROR GetCommissionableInstanceName(char * instanceName, size_t maxLength) const override;
     CHIP_ERROR UpdateCommissionableInstanceName() override;
 
@@ -205,10 +206,6 @@ private:
     /// removes all records by advertising a 0 TTL)
     void AdvertiseRecords(BroadcastAdvertiseType type);
 
-    /// Determine if advertisement on the specified interface/address is ok given the
-    /// interfaces on which the mDNS server is listening
-    bool ShouldAdvertiseOn(const chip::Inet::InterfaceId id, const chip::Inet::IPAddress & addr);
-
     FullQName GetCommissioningTxtEntries(const CommissionAdvertisingParameters & params);
     FullQName GetOperationalTxtEntries(OperationalQueryAllocator::Allocator * allocator,
                                        const OperationalAdvertisingParameters & params);
@@ -216,8 +213,11 @@ private:
     struct CommonTxtEntryStorage
     {
         // +2 for all to account for '=' and terminating nullchar
-        char sleepyIdleIntervalBuf[KeySize(TxtFieldKey::kSleepyIdleInterval) + ValSize(TxtFieldKey::kSleepyIdleInterval) + 2];
-        char sleepyActiveIntervalBuf[KeySize(TxtFieldKey::kSleepyActiveInterval) + ValSize(TxtFieldKey::kSleepyActiveInterval) + 2];
+        char sessionIdleIntervalBuf[KeySize(TxtFieldKey::kSessionIdleInterval) + ValSize(TxtFieldKey::kSessionIdleInterval) + 2];
+        char sessionActiveIntervalBuf[KeySize(TxtFieldKey::kSessionActiveInterval) + ValSize(TxtFieldKey::kSessionActiveInterval) +
+                                      2];
+        char sessionActiveThresholdBuf[KeySize(TxtFieldKey::kSessionActiveThreshold) +
+                                       ValSize(TxtFieldKey::kSessionActiveThreshold) + 2];
         char tcpSupportedBuf[KeySize(TxtFieldKey::kTcpSupported) + ValSize(TxtFieldKey::kTcpSupported) + 2];
     };
     template <class Derived>
@@ -236,13 +236,14 @@ private:
                                     "MRP retry interval idle value exceeds allowed range of 1 hour, using maximum available");
                     mrp.mIdleRetransTimeout = kMaxRetryInterval;
                 }
-                size_t writtenCharactersNumber = snprintf(storage.sleepyIdleIntervalBuf, sizeof(storage.sleepyIdleIntervalBuf),
-                                                          "SII=%" PRIu32, mrp.mIdleRetransTimeout.count());
+                size_t writtenCharactersNumber =
+                    static_cast<size_t>(snprintf(storage.sessionIdleIntervalBuf, sizeof(storage.sessionIdleIntervalBuf),
+                                                 "SII=%" PRIu32, mrp.mIdleRetransTimeout.count()));
                 VerifyOrReturnError((writtenCharactersNumber > 0) &&
-                                        (writtenCharactersNumber < sizeof(storage.sleepyIdleIntervalBuf)),
+                                        (writtenCharactersNumber < sizeof(storage.sessionIdleIntervalBuf)),
                                     CHIP_ERROR_INVALID_STRING_LENGTH);
 
-                txtFields[numTxtFields++] = storage.sleepyIdleIntervalBuf;
+                txtFields[numTxtFields++] = storage.sessionIdleIntervalBuf;
             }
 
             {
@@ -252,18 +253,29 @@ private:
                                     "MRP retry interval active value exceeds allowed range of 1 hour, using maximum available");
                     mrp.mActiveRetransTimeout = kMaxRetryInterval;
                 }
-                size_t writtenCharactersNumber = snprintf(storage.sleepyActiveIntervalBuf, sizeof(storage.sleepyActiveIntervalBuf),
-                                                          "SAI=%" PRIu32, mrp.mActiveRetransTimeout.count());
+                size_t writtenCharactersNumber =
+                    static_cast<size_t>(snprintf(storage.sessionActiveIntervalBuf, sizeof(storage.sessionActiveIntervalBuf),
+                                                 "SAI=%" PRIu32, mrp.mActiveRetransTimeout.count()));
                 VerifyOrReturnError((writtenCharactersNumber > 0) &&
-                                        (writtenCharactersNumber < sizeof(storage.sleepyActiveIntervalBuf)),
+                                        (writtenCharactersNumber < sizeof(storage.sessionActiveIntervalBuf)),
                                     CHIP_ERROR_INVALID_STRING_LENGTH);
-                txtFields[numTxtFields++] = storage.sleepyActiveIntervalBuf;
+                txtFields[numTxtFields++] = storage.sessionActiveIntervalBuf;
+            }
+
+            {
+                size_t writtenCharactersNumber =
+                    static_cast<size_t>(snprintf(storage.sessionActiveThresholdBuf, sizeof(storage.sessionActiveThresholdBuf),
+                                                 "SAT=%u", mrp.mActiveThresholdTime.count()));
+                VerifyOrReturnError((writtenCharactersNumber > 0) &&
+                                        (writtenCharactersNumber < sizeof(storage.sessionActiveThresholdBuf)),
+                                    CHIP_ERROR_INVALID_STRING_LENGTH);
+                txtFields[numTxtFields++] = storage.sessionActiveThresholdBuf;
             }
         }
         if (params.GetTcpSupported().HasValue())
         {
-            size_t writtenCharactersNumber =
-                snprintf(storage.tcpSupportedBuf, sizeof(storage.tcpSupportedBuf), "T=%d", params.GetTcpSupported().Value());
+            size_t writtenCharactersNumber = static_cast<size_t>(
+                snprintf(storage.tcpSupportedBuf, sizeof(storage.tcpSupportedBuf), "T=%d", params.GetTcpSupported().Value()));
             VerifyOrReturnError((writtenCharactersNumber > 0) && (writtenCharactersNumber < sizeof(storage.tcpSupportedBuf)),
                                 CHIP_ERROR_INVALID_STRING_LENGTH);
             txtFields[numTxtFields++] = storage.tcpSupportedBuf;
@@ -290,7 +302,7 @@ private:
 
     // current request handling
     const chip::Inet::IPPacketInfo * mCurrentSource = nullptr;
-    uint32_t mMessageId                             = 0;
+    uint16_t mMessageId                             = 0;
 
     const char * mEmptyTextEntries[1] = {
         "=",
@@ -337,7 +349,7 @@ CHIP_ERROR AdvertiserMinMdns::Init(chip::Inet::EndPointManager<chip::Inet::UDPEn
     // is true.  But we don't handle updates to our set of interfaces right now,
     // so rely on the logic in this function to shut down and restart the
     // GlobalMinimalMdnsServer to handle that.
-    GlobalMinimalMdnsServer::Server().Shutdown();
+    GlobalMinimalMdnsServer::Server().ShutdownEndpoints();
 
     if (!mIsInitialized)
     {
@@ -361,6 +373,8 @@ CHIP_ERROR AdvertiserMinMdns::Init(chip::Inet::EndPointManager<chip::Inet::UDPEn
 
 void AdvertiserMinMdns::Shutdown()
 {
+    VerifyOrReturn(mIsInitialized);
+
     AdvertiseRecords(BroadcastAdvertiseType::kRemovingAll);
 
     GlobalMinimalMdnsServer::Server().Shutdown();
@@ -369,6 +383,8 @@ void AdvertiserMinMdns::Shutdown()
 
 CHIP_ERROR AdvertiserMinMdns::RemoveServices()
 {
+    VerifyOrReturnError(mIsInitialized, CHIP_ERROR_INCORRECT_STATE);
+
     // Send a "goodbye" packet for each RR being removed, as defined in RFC 6762.
     // This allows mDNS clients to remove stale cached records which may not be re-added with
     // subsequent Advertise() calls. In the case the same records are re-added, this extra
@@ -444,6 +460,8 @@ OperationalQueryAllocator::Allocator * AdvertiserMinMdns::FindEmptyOperationalAl
 
 CHIP_ERROR AdvertiserMinMdns::Advertise(const OperationalAdvertisingParameters & params)
 {
+    VerifyOrReturnError(mIsInitialized, CHIP_ERROR_INCORRECT_STATE);
+
     char nameBuffer[Operational::kInstanceNameMaxLength + 1] = "";
 
     // need to set server name
@@ -545,6 +563,12 @@ CHIP_ERROR AdvertiserMinMdns::Advertise(const OperationalAdvertisingParameters &
     return CHIP_NO_ERROR;
 }
 
+CHIP_ERROR AdvertiserMinMdns::FinalizeServiceUpdate()
+{
+    VerifyOrReturnError(mIsInitialized, CHIP_ERROR_INCORRECT_STATE);
+    return CHIP_NO_ERROR;
+}
+
 CHIP_ERROR AdvertiserMinMdns::GetCommissionableInstanceName(char * instanceName, size_t maxLength) const
 {
     if (maxLength < (Commission::kInstanceNameMaxLength + 1))
@@ -566,6 +590,8 @@ CHIP_ERROR AdvertiserMinMdns::UpdateCommissionableInstanceName()
 
 CHIP_ERROR AdvertiserMinMdns::Advertise(const CommissionAdvertisingParameters & params)
 {
+    VerifyOrReturnError(mIsInitialized, CHIP_ERROR_INCORRECT_STATE);
+
     if (params.GetCommissionAdvertiseMode() == CommssionAdvertiseMode::kCommissionableNode)
     {
         mQueryResponderAllocatorCommissionable.Clear();
@@ -839,35 +865,6 @@ FullQName AdvertiserMinMdns::GetCommissioningTxtEntries(const CommissionAdvertis
     return allocator->AllocateQNameFromArray(txtFields, numTxtFields);
 }
 
-bool AdvertiserMinMdns::ShouldAdvertiseOn(const chip::Inet::InterfaceId id, const chip::Inet::IPAddress & addr)
-{
-    auto & server = GlobalMinimalMdnsServer::Server();
-
-    bool result = false;
-
-    server.ForEachEndPoints([&](auto * info) {
-        if (info->mListenUdp == nullptr)
-        {
-            return chip::Loop::Continue;
-        }
-
-        if (info->mInterfaceId != id)
-        {
-            return chip::Loop::Continue;
-        }
-
-        if (info->mAddressType != addr.Type())
-        {
-            return chip::Loop::Continue;
-        }
-
-        result = true;
-        return chip::Loop::Break;
-    });
-
-    return result;
-}
-
 void AdvertiserMinMdns::AdvertiseRecords(BroadcastAdvertiseType type)
 {
     ResponseConfiguration responseConfiguration;
@@ -878,6 +875,7 @@ void AdvertiserMinMdns::AdvertiseRecords(BroadcastAdvertiseType type)
     }
 
     UniquePtr<ListenIterator> allInterfaces = GetAddressPolicy()->GetListenEndpoints();
+    VerifyOrDieWithMsg(allInterfaces != nullptr, Discovery, "Failed to allocate memory for endpoints.");
 
     chip::Inet::InterfaceId interfaceId;
     chip::Inet::IPAddressType addressType;
@@ -885,61 +883,56 @@ void AdvertiserMinMdns::AdvertiseRecords(BroadcastAdvertiseType type)
     while (allInterfaces->Next(&interfaceId, &addressType))
     {
         UniquePtr<IpAddressIterator> allIps = GetAddressPolicy()->GetIpAddressesForEndpoint(interfaceId, addressType);
+        VerifyOrDieWithMsg(allIps != nullptr, Discovery, "Failed to allocate memory for ip addresses.");
 
-        Inet::IPAddress ipAddress;
-        while (allIps->Next(ipAddress))
+        chip::Inet::IPPacketInfo packetInfo;
+
+        packetInfo.Clear();
+
+        // advertising on every interface requires a valid IP address
+        // since we use "BROADCAST" (unicast is false), we do not actually care about
+        // the source IP address value, just that it has the right "type"
+        //
+        // NOTE: cannot use Broadcast address as the source as they have the type kAny.
+        //
+        // TODO: ideally we may want to have a destination that is explicit as "unicast/destIp"
+        //       vs "multicast/addressType". Such a change requires larger code updates.
+        packetInfo.SrcAddress  = chip::Inet::IPAddress::Loopback(addressType);
+        packetInfo.DestAddress = BroadcastIpAddresses::Get(addressType);
+        packetInfo.SrcPort     = kMdnsPort;
+        packetInfo.DestPort    = kMdnsPort;
+        packetInfo.Interface   = interfaceId;
+
+        // Advertise all records
+        //
+        // TODO: Consider advertising delta changes.
+        //
+        // Current advertisement does not have a concept of "delta" to only
+        // advertise changes. Current implementation is to always
+        //    1. advertise TTL=0 (clear all caches)
+        //    2. advertise available records (with longer TTL)
+        //
+        // It would be nice if we could selectively advertise what changes, like
+        // send TTL=0 for anything removed/about to be removed (and only those),
+        // then only advertise new items added.
+        //
+        // This optimization likely will take more logic and state storage, so
+        // for now it is not done.
+        QueryData queryData(QType::PTR, QClass::IN, false /* unicast */);
+        queryData.SetIsAnnounceBroadcast(true);
+
+        for (auto & it : mOperationalResponders)
         {
-            if (!ShouldAdvertiseOn(interfaceId, ipAddress))
-            {
-                continue;
-            }
+            it.GetAllocator()->GetQueryResponder()->ClearBroadcastThrottle();
+        }
+        mQueryResponderAllocatorCommissionable.GetQueryResponder()->ClearBroadcastThrottle();
+        mQueryResponderAllocatorCommissioner.GetQueryResponder()->ClearBroadcastThrottle();
 
-            chip::Inet::IPPacketInfo packetInfo;
+        CHIP_ERROR err = mResponseSender.Respond(0, queryData, &packetInfo, responseConfiguration);
 
-            packetInfo.Clear();
-            packetInfo.SrcAddress = ipAddress;
-            if (ipAddress.IsIPv4())
-            {
-                BroadcastIpAddresses::GetIpv4Into(packetInfo.DestAddress);
-            }
-            else
-            {
-                BroadcastIpAddresses::GetIpv6Into(packetInfo.DestAddress);
-            }
-            packetInfo.SrcPort   = kMdnsPort;
-            packetInfo.DestPort  = kMdnsPort;
-            packetInfo.Interface = interfaceId;
-
-            // Advertise all records
-            //
-            // TODO: Consider advertising delta changes.
-            //
-            // Current advertisement does not have a concept of "delta" to only
-            // advertise changes. Current implementation is to always
-            //    1. advertise TTL=0 (clear all caches)
-            //    2. advertise available records (with longer TTL)
-            //
-            // It would be nice if we could selectively advertise what changes, like
-            // send TTL=0 for anything removed/about to be removed (and only those),
-            // then only advertise new items added.
-            //
-            // This optimization likely will take more logic and state storage, so
-            // for now it is not done.
-            QueryData queryData(QType::PTR, QClass::IN, false /* unicast */);
-            queryData.SetIsInternalBroadcast(true);
-
-            for (auto & it : mOperationalResponders)
-            {
-                it.GetAllocator()->GetQueryResponder()->ClearBroadcastThrottle();
-            }
-            mQueryResponderAllocatorCommissionable.GetQueryResponder()->ClearBroadcastThrottle();
-            mQueryResponderAllocatorCommissioner.GetQueryResponder()->ClearBroadcastThrottle();
-
-            CHIP_ERROR err = mResponseSender.Respond(0, queryData, &packetInfo, responseConfiguration);
-            if (err != CHIP_NO_ERROR)
-            {
-                ChipLogError(Discovery, "Failed to advertise records: %" CHIP_ERROR_FORMAT, err.Format());
-            }
+        if (err != CHIP_NO_ERROR)
+        {
+            ChipLogError(Discovery, "Failed to advertise records: %" CHIP_ERROR_FORMAT, err.Format());
         }
     }
 

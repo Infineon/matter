@@ -28,6 +28,7 @@ class NoneResolver : public Resolver
 {
 public:
     CHIP_ERROR Init(chip::Inet::EndPointManager<chip::Inet::UDPEndPoint> *) override { return CHIP_NO_ERROR; }
+    bool IsInitialized() override { return true; }
     void Shutdown() override {}
     void SetOperationalDelegate(OperationalResolveDelegate * delegate) override {}
     void SetCommissioningDelegate(CommissioningResolveDelegate * delegate) override {}
@@ -66,13 +67,6 @@ ResolverProxy::~ResolverProxy()
 {
     Shutdown();
 }
-
-CHIP_ERROR ResolverProxy::ResolveNodeId(const PeerId & peerId)
-{
-    return CHIP_ERROR_NOT_IMPLEMENTED;
-}
-
-void ResolverProxy::NodeIdResolutionNoLongerNeeded(const PeerId & peerId) {}
 
 CHIP_ERROR ResolverProxy::DiscoverCommissionableNodes(DiscoveryFilter filter)
 {

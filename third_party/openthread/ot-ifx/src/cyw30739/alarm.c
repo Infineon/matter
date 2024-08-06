@@ -37,6 +37,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "system.h"
 #include <clock_timer.h>
 #include <wiced_platform.h>
 #include <wiced_platform_memory.h>
@@ -65,7 +66,7 @@
 typedef struct alarm_timer_info
 {
     slist_node_t  node;
-    otInstance *  aInstance;
+    otInstance   *aInstance;
     wiced_timer_t timer;
 } alarm_timer_info_t;
 
@@ -73,7 +74,7 @@ typedef struct alarm_timer_info
 typedef struct alarm_fired
 {
     slist_node_t node;
-    otInstance * aInstance;
+    otInstance  *aInstance;
 } alarm_fired_t;
 
 /* Alarm module control block. */
@@ -155,7 +156,7 @@ static void alarmEnabledTimerListRemove(alarm_timer_info_t *p_target)
 
 static void alarmTimerCallback(WICED_TIMER_PARAM_TYPE cb_params)
 {
-    otInstance *  aInstance;
+    otInstance   *aInstance;
     slist_node_t *p_node;
 
     wiced_rtos_lock_mutex(alarm_cb.p_mutex);
@@ -189,7 +190,7 @@ static void alarmTimerCallback(WICED_TIMER_PARAM_TYPE cb_params)
     ((alarm_fired_t *)p_node)->aInstance = aInstance;
 
     /* Set an application thread event for this fired alarm. */
-    wiced_platform_application_thread_event_set(alarm_cb.event_code);
+    system_event_set(alarm_cb.event_code);
 
     wiced_rtos_unlock_mutex(alarm_cb.p_mutex);
 }
@@ -197,7 +198,7 @@ static void alarmTimerCallback(WICED_TIMER_PARAM_TYPE cb_params)
 static void alarmTimeoutHandler(void)
 {
     slist_node_t *p_node;
-    otInstance *  aInstance;
+    otInstance   *aInstance;
 
     ALARM_TRACE("%s\n", __FUNCTION__);
 
@@ -235,7 +236,7 @@ static void alarmTimeoutHandler(void)
     /* Set an application thread event if the fired alarm list is not empty. */
     if (slist_count(&alarm_cb.fired_alarm_list) > 0)
     {
-        wiced_platform_application_thread_event_set(alarm_cb.event_code);
+        system_event_set(alarm_cb.event_code);
     }
 }
 
@@ -367,15 +368,9 @@ void otPlatAlarmMilliStop(otInstance *aInstance)
     wiced_rtos_unlock_mutex(alarm_cb.p_mutex);
 }
 
-uint32_t otPlatAlarmMilliGetNow(void)
-{
-    return (uint32_t)(clock_SystemTimeMicroseconds64() / 1000);
-}
+uint32_t otPlatAlarmMilliGetNow(void) { return (uint32_t)(clock_SystemTimeMicroseconds64() / 1000); }
 
-uint32_t otPlatAlarmMicroGetNow(void)
-{
-    return clock_SystemTimeMicroseconds32();
-}
+uint32_t otPlatAlarmMicroGetNow(void) { return clock_SystemTimeMicroseconds32(); }
 
 void otPlatAlramInit(void)
 {
@@ -385,7 +380,7 @@ void otPlatAlramInit(void)
     }
 
     /* Get/Register the application thread event code. */
-    if (!wiced_platform_application_thread_event_register(&alarm_cb.event_code, alarmTimeoutHandler))
+    if (!system_event_register(&alarm_cb.event_code, alarmTimeoutHandler))
     {
         ALARM_TRACE("%s: Fail to get event code.\n", __FUNCTION__);
         return;
@@ -416,7 +411,4 @@ void otPlatAlramInit(void)
     alarm_cb.initialized = WICED_TRUE;
 }
 
-uint16_t otPlatTimeGetXtalAccuracy(void)
-{
-    return XTAL_ACCURACY;
-}
+uint16_t otPlatTimeGetXtalAccuracy(void) { return XTAL_ACCURACY; }

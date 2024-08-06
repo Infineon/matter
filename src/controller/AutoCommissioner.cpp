@@ -19,7 +19,6 @@
 #include <controller/AutoCommissioner.h>
 
 #include <app/InteractionModelTimeout.h>
-#include <controller-clusters/zap-generated/CHIPClusters.h>
 #include <controller/CHIPDeviceController.h>
 #include <credentials/CHIPCert.h>
 #include <lib/support/SafeInt.h>
@@ -45,26 +44,60 @@ void AutoCommissioner::SetOperationalCredentialsDelegate(OperationalCredentialsD
     mOperationalCredentialsDelegate = operationalCredentialsDelegate;
 }
 
+// Returns true if maybeUnsafeSpan is pointing to a buffer that we're not sure
+// will live for long enough.  knownSafeSpan, if it has a value, points to a
+// buffer that we _are_ sure will live for long enough.
+template <typename SpanType>
+static bool IsUnsafeSpan(const Optional<SpanType> & maybeUnsafeSpan, const Optional<SpanType> & knownSafeSpan)
+{
+    if (!maybeUnsafeSpan.HasValue())
+    {
+        return false;
+    }
+
+    if (!knownSafeSpan.HasValue())
+    {
+        return true;
+    }
+
+    return maybeUnsafeSpan.Value().data() != knownSafeSpan.Value().data();
+}
+
 CHIP_ERROR AutoCommissioner::SetCommissioningParameters(const CommissioningParameters & params)
 {
+    // Make sure any members that point to buffers that we are not pointing to
+    // our own buffers are not going to dangle.  We can skip this step if all
+    // the buffers pointers that we don't plan to re-point to our own buffers
+    // below are already pointing to the same things as our own buffer pointers
+    // (so that we know they have to be safe somehow).
+    //
+    // The checks are a bit painful, because Span does not have a usable
+    // operator==, and in any case, we want to compare for pointer equality, not
+    // data equality.
+    bool haveMaybeDanglingBufferPointers =
+        ((params.GetNOCChainGenerationParameters().HasValue() &&
+          (!mParams.GetNOCChainGenerationParameters().HasValue() ||
+           params.GetNOCChainGenerationParameters().Value().nocsrElements.data() !=
+               mParams.GetNOCChainGenerationParameters().Value().nocsrElements.data() ||
+           params.GetNOCChainGenerationParameters().Value().signature.data() !=
+               mParams.GetNOCChainGenerationParameters().Value().signature.data())) ||
+         IsUnsafeSpan(params.GetRootCert(), mParams.GetRootCert()) || IsUnsafeSpan(params.GetNoc(), mParams.GetNoc()) ||
+         IsUnsafeSpan(params.GetIcac(), mParams.GetIcac()) || IsUnsafeSpan(params.GetIpk(), mParams.GetIpk()) ||
+         IsUnsafeSpan(params.GetAttestationElements(), mParams.GetAttestationElements()) ||
+         IsUnsafeSpan(params.GetAttestationSignature(), mParams.GetAttestationSignature()) ||
+         IsUnsafeSpan(params.GetPAI(), mParams.GetPAI()) || IsUnsafeSpan(params.GetDAC(), mParams.GetDAC()) ||
+         IsUnsafeSpan(params.GetTimeZone(), mParams.GetTimeZone()) ||
+         IsUnsafeSpan(params.GetDSTOffsets(), mParams.GetDSTOffsets()));
+
     mParams = params;
-    if (params.GetFailsafeTimerSeconds().HasValue())
+
+    if (haveMaybeDanglingBufferPointers)
     {
-        ChipLogProgress(Controller, "Setting failsafe timer from parameters");
-        mParams.SetFailsafeTimerSeconds(params.GetFailsafeTimerSeconds().Value());
+        mParams.ClearExternalBufferDependentValues();
     }
 
-    if (params.GetCASEFailsafeTimerSeconds().HasValue())
-    {
-        ChipLogProgress(Controller, "Setting CASE failsafe timer from parameters");
-        mParams.SetCASEFailsafeTimerSeconds(params.GetCASEFailsafeTimerSeconds().Value());
-    }
-
-    if (params.GetAdminSubject().HasValue())
-    {
-        ChipLogProgress(Controller, "Setting adminSubject from parameters");
-        mParams.SetAdminSubject(params.GetAdminSubject().Value());
-    }
+    // For members of params that point to some sort of buffer, we have to copy
+    // the data over into our own buffers.
 
     if (params.GetThreadOperationalDataset().HasValue())
     {
@@ -72,17 +105,13 @@ CHIP_ERROR AutoCommissioner::SetCommissioningParameters(const CommissioningParam
         if (dataset.size() > CommissioningParameters::kMaxThreadDatasetLen)
         {
             ChipLogError(Controller, "Thread operational data set is too large");
+            // Make sure our buffer pointers don't dangle.
+            mParams.ClearExternalBufferDependentValues();
             return CHIP_ERROR_INVALID_ARGUMENT;
         }
         memcpy(mThreadOperationalDataset, dataset.data(), dataset.size());
         ChipLogProgress(Controller, "Setting thread operational dataset from parameters");
         mParams.SetThreadOperationalDataset(ByteSpan(mThreadOperationalDataset, dataset.size()));
-    }
-
-    if (params.GetAttemptThreadNetworkScan().HasValue())
-    {
-        ChipLogProgress(Controller, "Setting attempt thread scan from parameters");
-        mParams.SetAttemptThreadNetworkScan(params.GetAttemptThreadNetworkScan().Value());
     }
 
     if (params.GetWiFiCredentials().HasValue())
@@ -92,6 +121,8 @@ CHIP_ERROR AutoCommissioner::SetCommissioningParameters(const CommissioningParam
             creds.credentials.size() > CommissioningParameters::kMaxCredentialsLen)
         {
             ChipLogError(Controller, "Wifi credentials are too large");
+            // Make sure our buffer pointers don't dangle.
+            mParams.ClearExternalBufferDependentValues();
             return CHIP_ERROR_INVALID_ARGUMENT;
         }
         memcpy(mSsid, creds.ssid.data(), creds.ssid.size());
@@ -99,12 +130,6 @@ CHIP_ERROR AutoCommissioner::SetCommissioningParameters(const CommissioningParam
         ChipLogProgress(Controller, "Setting wifi credentials from parameters");
         mParams.SetWiFiCredentials(
             WiFiCredentials(ByteSpan(mSsid, creds.ssid.size()), ByteSpan(mCredentials, creds.credentials.size())));
-    }
-
-    if (params.GetAttemptWiFiNetworkScan().HasValue())
-    {
-        ChipLogProgress(Controller, "Setting attempt wifi scan from parameters");
-        mParams.SetAttemptWiFiNetworkScan(params.GetAttemptWiFiNetworkScan().Value());
     }
 
     if (params.GetCountryCode().HasValue())
@@ -118,6 +143,9 @@ CHIP_ERROR AutoCommissioner::SetCommissioningParameters(const CommissioningParam
         else
         {
             ChipLogError(Controller, "Country code is too large: %u", static_cast<unsigned>(code.size()));
+            // Make sure our buffer pointers don't dangle.
+            mParams.ClearExternalBufferDependentValues();
+            return CHIP_ERROR_INVALID_ARGUMENT;
         }
     }
 
@@ -148,10 +176,33 @@ CHIP_ERROR AutoCommissioner::SetCommissioningParameters(const CommissioningParam
     }
     mParams.SetCSRNonce(ByteSpan(mCSRNonce, sizeof(mCSRNonce)));
 
-    if (params.GetSkipCommissioningComplete().HasValue())
+    if (params.GetDSTOffsets().HasValue())
     {
-        ChipLogProgress(Controller, "Setting PASE-only commissioning from parameters");
-        mParams.SetSkipCommissioningComplete(params.GetSkipCommissioningComplete().Value());
+        ChipLogProgress(Controller, "Setting DST offsets from parameters");
+        size_t size = std::min(params.GetDSTOffsets().Value().size(), kMaxSupportedDstStructs);
+        for (size_t i = 0; i < size; ++i)
+        {
+            mDstOffsetsBuf[i] = params.GetDSTOffsets().Value()[i];
+        }
+        auto list = app::DataModel::List<app::Clusters::TimeSynchronization::Structs::DSTOffsetStruct::Type>(mDstOffsetsBuf, size);
+        mParams.SetDSTOffsets(list);
+    }
+    if (params.GetTimeZone().HasValue())
+    {
+        ChipLogProgress(Controller, "Setting Time Zone from parameters");
+        size_t size = std::min(params.GetTimeZone().Value().size(), kMaxSupportedTimeZones);
+        for (size_t i = 0; i < size; ++i)
+        {
+            mTimeZoneBuf[i] = params.GetTimeZone().Value()[i];
+            if (mTimeZoneBuf[i].name.HasValue())
+            {
+                auto span = MutableCharSpan(mTimeZoneNames[i], kMaxTimeZoneNameLen);
+                CopyCharSpanToMutableCharSpan(mTimeZoneBuf[i].name.Value(), span);
+                mTimeZoneBuf[i].name.SetValue(span);
+            }
+        }
+        auto list = app::DataModel::List<app::Clusters::TimeSynchronization::Structs::TimeZoneStruct::Type>(mTimeZoneBuf, size);
+        mParams.SetTimeZone(list);
     }
 
     return CHIP_NO_ERROR;
@@ -222,10 +273,53 @@ CommissioningStage AutoCommissioner::GetNextCommissioningStageInternal(Commissio
             // Per the spec, we restart from after adding the NOC.
             return GetNextCommissioningStage(CommissioningStage::kSendNOC, lastErr);
         }
+        if (mParams.GetCheckForMatchingFabric())
+        {
+            return CommissioningStage::kCheckForMatchingFabric;
+        }
+        return CommissioningStage::kArmFailsafe;
+    case CommissioningStage::kCheckForMatchingFabric:
         return CommissioningStage::kArmFailsafe;
     case CommissioningStage::kArmFailsafe:
         return CommissioningStage::kConfigRegulatory;
     case CommissioningStage::kConfigRegulatory:
+        if (mDeviceCommissioningInfo.requiresUTC)
+        {
+            return CommissioningStage::kConfigureUTCTime;
+        }
+        else
+        {
+            // Time cluster is not supported, move right to DA
+            return CommissioningStage::kSendPAICertificateRequest;
+        }
+    case CommissioningStage::kConfigureUTCTime:
+        if (mDeviceCommissioningInfo.requiresTimeZone && mParams.GetTimeZone().HasValue())
+        {
+            return kConfigureTimeZone;
+        }
+        else
+        {
+            return GetNextCommissioningStageInternal(CommissioningStage::kConfigureTimeZone, lastErr);
+        }
+    case CommissioningStage::kConfigureTimeZone:
+        if (mNeedsDST && mParams.GetDSTOffsets().HasValue())
+        {
+            return CommissioningStage::kConfigureDSTOffset;
+        }
+        else
+        {
+            return GetNextCommissioningStageInternal(CommissioningStage::kConfigureDSTOffset, lastErr);
+        }
+    case CommissioningStage::kConfigureDSTOffset:
+        if (mDeviceCommissioningInfo.requiresDefaultNTP && mParams.GetDefaultNTP().HasValue())
+        {
+            return CommissioningStage::kConfigureDefaultNTP;
+        }
+        else
+        {
+            return GetNextCommissioningStageInternal(CommissioningStage::kConfigureDefaultNTP, lastErr);
+        }
+    case CommissioningStage::kConfigureDefaultNTP:
         return CommissioningStage::kSendPAICertificateRequest;
     case CommissioningStage::kSendPAICertificateRequest:
         return CommissioningStage::kSendDACCertificateRequest;
@@ -244,6 +338,15 @@ CommissioningStage AutoCommissioner::GetNextCommissioningStageInternal(Commissio
     case CommissioningStage::kSendTrustedRootCert:
         return CommissioningStage::kSendNOC;
     case CommissioningStage::kSendNOC:
+        if (mDeviceCommissioningInfo.requiresTrustedTimeSource && mParams.GetTrustedTimeSource().HasValue())
+        {
+            return CommissioningStage::kConfigureTrustedTimeSource;
+        }
+        else
+        {
+            return GetNextCommissioningStageInternal(CommissioningStage::kConfigureTrustedTimeSource, lastErr);
+        }
+    case CommissioningStage::kConfigureTrustedTimeSource:
         // TODO(cecille): device attestation casues operational cert provisioning to happen, This should be a separate stage.
         // For thread and wifi, this should go to network setup then enable. For on-network we can skip right to finding the
         // operational network because the provisioning of certificates will trigger the device to start operational advertising.
@@ -281,18 +384,21 @@ CommissioningStage AutoCommissioner::GetNextCommissioningStageInternal(Commissio
         }
         else
         {
-            return CommissioningStage::kWiFiNetworkEnable;
+            return CommissioningStage::kFailsafeBeforeWiFiEnable;
         }
     case CommissioningStage::kThreadNetworkSetup:
         if (mParams.GetWiFiCredentials().HasValue() && mDeviceCommissioningInfo.network.wifi.endpoint != kInvalidEndpointId)
         {
-            return CommissioningStage::kWiFiNetworkEnable;
+            return CommissioningStage::kFailsafeBeforeWiFiEnable;
         }
         else
         {
-            return CommissioningStage::kThreadNetworkEnable;
+            return CommissioningStage::kFailsafeBeforeThreadEnable;
         }
-
+    case CommissioningStage::kFailsafeBeforeWiFiEnable:
+        return CommissioningStage::kWiFiNetworkEnable;
+    case CommissioningStage::kFailsafeBeforeThreadEnable:
+        return CommissioningStage::kThreadNetworkEnable;
     case CommissioningStage::kWiFiNetworkEnable:
         if (mParams.GetThreadOperationalDataset().HasValue() &&
             mDeviceCommissioningInfo.network.thread.endpoint != kInvalidEndpointId)
@@ -354,6 +460,9 @@ void AutoCommissioner::SetCASEFailsafeTimerIfNeeded()
         // CASE establishment, and receipt of the commissioning complete command.
         // We know that the mCommissioneeDeviceProxy is still valid at this point since it gets cleared during cleanup
         // and SetCASEFailsafeTimerIfNeeded is always called before that stage.
+        //
+        // A false return from ExtendArmFailSafe is fine; we don't want to make
+        // the fail-safe shorter here.
         mCommissioner->ExtendArmFailSafe(mCommissioneeDeviceProxy, CommissioningStage::kFindOperational,
                                          mParams.GetCASEFailsafeTimerSeconds().Value(),
                                          GetCommandTimeout(mCommissioneeDeviceProxy, CommissioningStage::kArmFailsafe),
@@ -450,7 +559,7 @@ Optional<System::Clock::Timeout> AutoCommissioner::GetCommandTimeout(DeviceProxy
     return MakeOptional(timeout);
 }
 
-CHIP_ERROR AutoCommissioner::NOCChainGenerated(ByteSpan noc, ByteSpan icac, ByteSpan rcac, AesCcm128KeySpan ipk,
+CHIP_ERROR AutoCommissioner::NOCChainGenerated(ByteSpan noc, ByteSpan icac, ByteSpan rcac, IdentityProtectionKeySpan ipk,
                                                NodeId adminSubject)
 {
     // Reuse ICA Cert buffer for temporary store Root Cert.
@@ -554,10 +663,19 @@ CHIP_ERROR AutoCommissioner::CommissioningStepFinished(CHIP_ERROR err, Commissio
                 .SetRemoteProductId(mDeviceCommissioningInfo.basic.productId)
                 .SetDefaultRegulatoryLocation(mDeviceCommissioningInfo.general.currentRegulatoryLocation)
                 .SetLocationCapability(mDeviceCommissioningInfo.general.locationCapability);
-            if (mDeviceCommissioningInfo.nodeId != kUndefinedNodeId)
+            // Don't send DST unless the device says it needs it
+            mNeedsDST = false;
+            break;
+        case CommissioningStage::kCheckForMatchingFabric: {
+            chip::NodeId nodeId = report.Get<MatchingFabricInfo>().nodeId;
+            if (nodeId != kUndefinedNodeId)
             {
-                mParams.SetRemoteNodeId(mDeviceCommissioningInfo.nodeId);
+                mParams.SetRemoteNodeId(nodeId);
             }
+            break;
+        }
+        case CommissioningStage::kConfigureTimeZone:
+            mNeedsDST = report.Get<TimeZoneResponseInfo>().requiresDSTOffsets;
             break;
         case CommissioningStage::kSendPAICertificateRequest:
             SetPAI(report.Get<RequestedCertificate>().certificate);
@@ -624,6 +742,7 @@ CHIP_ERROR AutoCommissioner::CommissioningStepFinished(CHIP_ERROR err, Commissio
             mCommissioneeDeviceProxy = nullptr;
             mOperationalDeviceProxy  = OperationalDeviceProxy();
             mDeviceCommissioningInfo = ReadCommissioningInfo();
+            mNeedsDST                = false;
             return CHIP_NO_ERROR;
         default:
             break;
@@ -665,6 +784,26 @@ CHIP_ERROR AutoCommissioner::PerformStep(CommissioningStage nextStage)
     {
         ChipLogError(Controller, "Invalid device for commissioning");
         return CHIP_ERROR_INCORRECT_STATE;
+    }
+    // Perform any last minute parameter adjustments before calling the commissioner object
+    switch (nextStage)
+    {
+    case CommissioningStage::kConfigureTimeZone:
+        if (mParams.GetTimeZone().Value().size() > mDeviceCommissioningInfo.maxTimeZoneSize)
+        {
+            mParams.SetTimeZone(app::DataModel::List<app::Clusters::TimeSynchronization::Structs::TimeZoneStruct::Type>(
+                mParams.GetTimeZone().Value().SubSpan(0, mDeviceCommissioningInfo.maxTimeZoneSize)));
+        }
+        break;
+    case CommissioningStage::kConfigureDSTOffset:
+        if (mParams.GetDSTOffsets().Value().size() > mDeviceCommissioningInfo.maxDSTSize)
+        {
+            mParams.SetDSTOffsets(app::DataModel::List<app::Clusters::TimeSynchronization::Structs::DSTOffsetStruct::Type>(
+                mParams.GetDSTOffsets().Value().SubSpan(0, mDeviceCommissioningInfo.maxDSTSize)));
+        }
+        break;
+    default:
+        break;
     }
 
     mCommissioner->PerformCommissioningStep(proxy, nextStage, mParams, this, GetEndpoint(nextStage),

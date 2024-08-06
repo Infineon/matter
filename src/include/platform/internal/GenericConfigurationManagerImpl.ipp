@@ -26,6 +26,7 @@
 #ifndef GENERIC_CONFIGURATION_MANAGER_IMPL_CPP
 #define GENERIC_CONFIGURATION_MANAGER_IMPL_CPP
 
+#include <FirmwareBuildTime.h>
 #include <ble/CHIPBleServiceData.h>
 #include <crypto/CHIPCryptoPAL.h>
 #include <crypto/RandUtils.h>
@@ -290,6 +291,12 @@ CHIP_ERROR GenericConfigurationManagerImpl<ConfigClass>::GetFirmwareBuildChipEpo
         chipEpochTime = sFirmwareBuildChipEpochTime.Value();
         return CHIP_NO_ERROR;
     }
+#ifdef CHIP_DEVICE_CONFIG_FIRMWARE_BUILD_TIME_MATTER_EPOCH_S
+    {
+        chipEpochTime = chip::System::Clock::Seconds32(CHIP_DEVICE_CONFIG_FIRMWARE_BUILD_TIME_MATTER_EPOCH_S);
+        return CHIP_NO_ERROR;
+    }
+#endif
     // Else, attempt to read the hard-coded values.
     VerifyOrReturnError(!BUILD_DATE_IS_BAD(CHIP_DEVICE_CONFIG_FIRMWARE_BUILD_DATE), CHIP_ERROR_INTERNAL);
     VerifyOrReturnError(!BUILD_TIME_IS_BAD(CHIP_DEVICE_CONFIG_FIRMWARE_BUILD_TIME), CHIP_ERROR_INTERNAL);
@@ -697,6 +704,19 @@ void GenericConfigurationManagerImpl<ConfigClass>::LogDeviceConfig()
             productId = 0;
         }
         ChipLogProgress(DeviceLayer, "  Product Id: %u (0x%X)", productId, productId);
+    }
+
+    {
+        char productName[ConfigurationManager::kMaxProductNameLength + 1];
+        err = deviceInstanceInfoProvider->GetProductName(productName, sizeof(productName));
+        if (CHIP_NO_ERROR == err)
+        {
+            ChipLogProgress(DeviceLayer, "  Product Name: %s", productName);
+        }
+        else
+        {
+            ChipLogError(DeviceLayer, "  Product Name: n/a (%" CHIP_ERROR_FORMAT ")", err.Format());
+        }
     }
 
     {

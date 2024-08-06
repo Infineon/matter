@@ -17,6 +17,7 @@
  */
 
 #pragma once
+#include <app-common/zap-generated/cluster-objects.h>
 #include <app/OperationalSessionSetup.h>
 #include <controller/CommissioneeDeviceProxy.h>
 #include <credentials/attestation_verifier/DeviceAttestationDelegate.h>
@@ -32,26 +33,34 @@ class DeviceCommissioner;
 enum CommissioningStage : uint8_t
 {
     kError,
-    kSecurePairing,             ///< Establish a PASE session with the device
-    kReadCommissioningInfo,     ///< Query General Commissioning Attributes and Network Features
-    kArmFailsafe,               ///< Send ArmFailSafe (0x30:0) command to the device
-    kConfigRegulatory,          ///< Send SetRegulatoryConfig (0x30:2) command to the device
-    kSendPAICertificateRequest, ///< Send PAI CertificateChainRequest (0x3E:2) command to the device
-    kSendDACCertificateRequest, ///< Send DAC CertificateChainRequest (0x3E:2) command to the device
-    kSendAttestationRequest,    ///< Send AttestationRequest (0x3E:0) command to the device
-    kAttestationVerification,   ///< Verify AttestationResponse (0x3E:1) validity
-    kSendOpCertSigningRequest,  ///< Send CSRRequest (0x3E:4) command to the device
-    kValidateCSR,               ///< Verify CSRResponse (0x3E:5) validity
-    kGenerateNOCChain,          ///< TLV encode Node Operational Credentials (NOC) chain certs
-    kSendTrustedRootCert,       ///< Send AddTrustedRootCertificate (0x3E:11) command to the device
-    kSendNOC,                   ///< Send AddNOC (0x3E:6) command to the device
-    kWiFiNetworkSetup,          ///< Send AddOrUpdateWiFiNetwork (0x31:2) command to the device
-    kThreadNetworkSetup,        ///< Send AddOrUpdateThreadNetwork (0x31:3) command to the device
-    kWiFiNetworkEnable,         ///< Send ConnectNetwork (0x31:6) command to the device for the WiFi network
-    kThreadNetworkEnable,       ///< Send ConnectNetwork (0x31:6) command to the device for the Thread network
-    kFindOperational,           ///< Perform operational discovery and establish a CASE session with the device
-    kSendComplete,              ///< Send CommissioningComplete (0x30:4) command to the device
-    kCleanup,                   ///< Call delegates with status, free memory, clear timers and state
+    kSecurePairing,              ///< Establish a PASE session with the device
+    kReadCommissioningInfo,      ///< Query General Commissioning Attributes, Network Features and Time Synchronization Cluster
+    kCheckForMatchingFabric,     ///< Read the current fabrics on the commissionee
+    kArmFailsafe,                ///< Send ArmFailSafe (0x30:0) command to the device
+    kConfigRegulatory,           ///< Send SetRegulatoryConfig (0x30:2) command to the device
+    kConfigureUTCTime,           ///< SetUTCTime if the DUT has a time cluster
+    kConfigureTimeZone,          ///< Configure a time zone if one is required and available
+    kConfigureDSTOffset,         ///< Configure DST offset if one is required and available
+    kConfigureDefaultNTP,        ///< Configure a default NTP server if one is required and available
+    kSendPAICertificateRequest,  ///< Send PAI CertificateChainRequest (0x3E:2) command to the device
+    kSendDACCertificateRequest,  ///< Send DAC CertificateChainRequest (0x3E:2) command to the device
+    kSendAttestationRequest,     ///< Send AttestationRequest (0x3E:0) command to the device
+    kAttestationVerification,    ///< Verify AttestationResponse (0x3E:1) validity
+    kSendOpCertSigningRequest,   ///< Send CSRRequest (0x3E:4) command to the device
+    kValidateCSR,                ///< Verify CSRResponse (0x3E:5) validity
+    kGenerateNOCChain,           ///< TLV encode Node Operational Credentials (NOC) chain certs
+    kSendTrustedRootCert,        ///< Send AddTrustedRootCertificate (0x3E:11) command to the device
+    kSendNOC,                    ///< Send AddNOC (0x3E:6) command to the device
+    kConfigureTrustedTimeSource, ///< Configure a trusted time source if one is required and available (must be done after SendNOC)
+    kWiFiNetworkSetup,           ///< Send AddOrUpdateWiFiNetwork (0x31:2) command to the device
+    kThreadNetworkSetup,         ///< Send AddOrUpdateThreadNetwork (0x31:3) command to the device
+    kFailsafeBeforeWiFiEnable,   ///< Extend the fail-safe before doing kWiFiNetworkEnable
+    kFailsafeBeforeThreadEnable, ///< Extend the fail-safe before doing kThreadNetworkEnable
+    kWiFiNetworkEnable,          ///< Send ConnectNetwork (0x31:6) command to the device for the WiFi network
+    kThreadNetworkEnable,        ///< Send ConnectNetwork (0x31:6) command to the device for the Thread network
+    kFindOperational,            ///< Perform operational discovery and establish a CASE session with the device
+    kSendComplete,               ///< Send CommissioningComplete (0x30:4) command to the device
+    kCleanup,                    ///< Call delegates with status, free memory, clear timers and state
     /// Send ScanNetworks (0x31:0) command to the device.
     /// ScanNetworks can happen anytime after kArmFailsafe.
     /// However, the cirque tests fail if it is earlier in the list
@@ -83,15 +92,15 @@ struct CompletionStatus
     CHIP_ERROR err;
     Optional<CommissioningStage> failedStage;
     Optional<Credentials::AttestationVerificationResult> attestationResult;
-    Optional<app::Clusters::GeneralCommissioning::CommissioningError> commissioningError;
-    Optional<app::Clusters::NetworkCommissioning::NetworkCommissioningStatus> networkCommissioningStatus;
+    Optional<app::Clusters::GeneralCommissioning::CommissioningErrorEnum> commissioningError;
+    Optional<app::Clusters::NetworkCommissioning::NetworkCommissioningStatusEnum> networkCommissioningStatus;
 };
 
-constexpr uint16_t kDefaultFailsafeTimeout = 60;
+inline constexpr uint16_t kDefaultFailsafeTimeout = 60;
 
 // Per spec, all commands that are sent with the failsafe armed need at least
 // a 30s timeout.
-constexpr System::Clock::Timeout kMinimumCommissioningStepTimeout = System::Clock::Seconds16(30);
+inline constexpr System::Clock::Timeout kMinimumCommissioningStepTimeout = System::Clock::Seconds16(30);
 
 class CommissioningParameters
 {
@@ -123,13 +132,41 @@ public:
     // (from GetLocationCapability - see below). If the regulatory location is not supplied, this will fall back to the location in
     // GetDefaultRegulatoryLocation and then to Outdoor (most restrictive).
     // This value should be set before calling PerformCommissioningStep for the kConfigRegulatory step.
-    const Optional<app::Clusters::GeneralCommissioning::RegulatoryLocationType> GetDeviceRegulatoryLocation() const
+    const Optional<app::Clusters::GeneralCommissioning::RegulatoryLocationTypeEnum> GetDeviceRegulatoryLocation() const
     {
         return mDeviceRegulatoryLocation;
     }
 
     // The country code to be used for the node, if set.
     Optional<CharSpan> GetCountryCode() const { return mCountryCode; }
+
+    // Time zone to set for the node
+    // If required, this will be truncated to fit the max size allowable on the node
+    Optional<app::DataModel::List<app::Clusters::TimeSynchronization::Structs::TimeZoneStruct::Type>> GetTimeZone() const
+    {
+        return mTimeZone;
+    }
+
+    // DST offset list. If required, this will be truncated to fit the max size allowable on the node
+    // DST list will only be sent if the commissionee requires DST offsets, as indicated in the SetTimeZone response
+    Optional<app::DataModel::List<app::Clusters::TimeSynchronization::Structs::DSTOffsetStruct::Type>> GetDSTOffsets() const
+    {
+        return mDSTOffsets;
+    }
+
+    // Default NTP to set on the node if supported and required
+    // Default implementation will not overide a value already set on the commissionee
+    // TODO: Add a force option?
+    Optional<app::DataModel::Nullable<CharSpan>> GetDefaultNTP() const { return mDefaultNTP; }
+
+    // Trusted time source
+    // Default implementation will not override a value already set on the commissionee
+    // TODO: Add a force option?
+    Optional<app::DataModel::Nullable<app::Clusters::TimeSynchronization::Structs::FabricScopedTrustedTimeSourceStruct::Type>>
+    GetTrustedTimeSource() const
+    {
+        return mTrustedTimeSource;
+    }
 
     // Nonce sent to the node to use during the CSR request.
     // When using the AutoCommissioner, this value will be ignored in favour of the value supplied by the
@@ -177,9 +214,9 @@ public:
     // Epoch key for the identity protection key for the node being commissioned. In the AutoCommissioner, this is set by by the
     // kGenerateNOCChain stage through the OperationalCredentialsDelegate.
     // This value must be set before calling PerformCommissioningStep for the kSendNOC step.
-    const Optional<AesCcm128KeySpan> GetIpk() const
+    const Optional<IdentityProtectionKeySpan> GetIpk() const
     {
-        return mIpk.HasValue() ? Optional<AesCcm128KeySpan>(mIpk.Value().Span()) : Optional<AesCcm128KeySpan>();
+        return mIpk.HasValue() ? Optional<IdentityProtectionKeySpan>(mIpk.Value().Span()) : Optional<IdentityProtectionKeySpan>();
     }
 
     // Admin subject id used for the case access control entry created if the AddNOC command succeeds. In the AutoCommissioner, this
@@ -226,7 +263,7 @@ public:
     // Default regulatory location set by the node, as read from the GeneralCommissioning cluster. In the AutoCommissioner, this is
     // automatically set from report from the kReadCommissioningInfo stage.
     // This should be set before calling PerformCommissioningStep for the kConfigRegulatory step.
-    const Optional<app::Clusters::GeneralCommissioning::RegulatoryLocationType> GetDefaultRegulatoryLocation() const
+    const Optional<app::Clusters::GeneralCommissioning::RegulatoryLocationTypeEnum> GetDefaultRegulatoryLocation() const
     {
         return mDefaultRegulatoryLocation;
     }
@@ -234,7 +271,7 @@ public:
     // Location capabilities of the node, as read from the GeneralCommissioning cluster. In the AutoCommissioner, this is
     // automatically set from report from the kReadCommissioningInfo stage.
     // This should be set before calling PerformCommissioningStep for the kConfigRegulatory step.
-    const Optional<app::Clusters::GeneralCommissioning::RegulatoryLocationType> GetLocationCapability() const
+    const Optional<app::Clusters::GeneralCommissioning::RegulatoryLocationTypeEnum> GetLocationCapability() const
     {
         return mLocationCapability;
     }
@@ -255,7 +292,7 @@ public:
         return *this;
     }
 
-    CommissioningParameters & SetDeviceRegulatoryLocation(app::Clusters::GeneralCommissioning::RegulatoryLocationType location)
+    CommissioningParameters & SetDeviceRegulatoryLocation(app::Clusters::GeneralCommissioning::RegulatoryLocationTypeEnum location)
     {
         mDeviceRegulatoryLocation.SetValue(location);
         return *this;
@@ -266,6 +303,37 @@ public:
     CommissioningParameters & SetCountryCode(CharSpan countryCode)
     {
         mCountryCode.SetValue(countryCode);
+        return *this;
+    }
+
+    // The lifetime of the list buffer needs to exceed the lifetime of the CommissioningParameters object.
+    CommissioningParameters &
+    SetTimeZone(app::DataModel::List<app::Clusters::TimeSynchronization::Structs::TimeZoneStruct::Type> timeZone)
+    {
+        mTimeZone.SetValue(timeZone);
+        return *this;
+    }
+
+    // The lifetime of the list buffer needs to exceed the lifetime of the CommissioningParameters object.
+    CommissioningParameters &
+    SetDSTOffsets(app::DataModel::List<app::Clusters::TimeSynchronization::Structs::DSTOffsetStruct::Type> dstOffsets)
+    {
+        mDSTOffsets.SetValue(dstOffsets);
+        return *this;
+    }
+
+    // The lifetime of the char span needs to exceed the lifetime of the CommissioningParameters
+    CommissioningParameters & SetDefaultNTP(app::DataModel::Nullable<CharSpan> defaultNTP)
+    {
+        mDefaultNTP.SetValue(defaultNTP);
+        return *this;
+    }
+
+    CommissioningParameters & SetTrustedTimeSource(
+        app::DataModel::Nullable<app::Clusters::TimeSynchronization::Structs::FabricScopedTrustedTimeSourceStruct::Type>
+            trustedTimeSource)
+    {
+        mTrustedTimeSource.SetValue(trustedTimeSource);
         return *this;
     }
 
@@ -321,9 +389,9 @@ public:
         mIcac.SetValue(icac);
         return *this;
     }
-    CommissioningParameters & SetIpk(const AesCcm128KeySpan ipk)
+    CommissioningParameters & SetIpk(const IdentityProtectionKeySpan ipk)
     {
-        mIpk.SetValue(AesCcm128Key(ipk));
+        mIpk.SetValue(IdentityProtectionKey(ipk));
         return *this;
     }
     CommissioningParameters & SetAdminSubject(const NodeId adminSubject)
@@ -366,12 +434,12 @@ public:
         mRemoteProductId = MakeOptional(id);
         return *this;
     }
-    CommissioningParameters & SetDefaultRegulatoryLocation(app::Clusters::GeneralCommissioning::RegulatoryLocationType location)
+    CommissioningParameters & SetDefaultRegulatoryLocation(app::Clusters::GeneralCommissioning::RegulatoryLocationTypeEnum location)
     {
         mDefaultRegulatoryLocation = MakeOptional(location);
         return *this;
     }
-    CommissioningParameters & SetLocationCapability(app::Clusters::GeneralCommissioning::RegulatoryLocationType capability)
+    CommissioningParameters & SetLocationCapability(app::Clusters::GeneralCommissioning::RegulatoryLocationTypeEnum capability)
     {
         mLocationCapability = MakeOptional(capability);
         return *this;
@@ -425,11 +493,38 @@ public:
         return *this;
     }
 
+    // Clear all members that depend on some sort of external buffer.  Can be
+    // used to make sure that we are not holding any dangling pointers.
+    void ClearExternalBufferDependentValues()
+    {
+        mCSRNonce.ClearValue();
+        mAttestationNonce.ClearValue();
+        mWiFiCreds.ClearValue();
+        mCountryCode.ClearValue();
+        mThreadOperationalDataset.ClearValue();
+        mNOCChainGenerationParameters.ClearValue();
+        mRootCert.ClearValue();
+        mNoc.ClearValue();
+        mIcac.ClearValue();
+        mIpk.ClearValue();
+        mAttestationElements.ClearValue();
+        mAttestationSignature.ClearValue();
+        mPAI.ClearValue();
+        mDAC.ClearValue();
+        mTimeZone.ClearValue();
+        mDSTOffsets.ClearValue();
+    }
+
 private:
     // Items that can be set by the commissioner
     Optional<uint16_t> mFailsafeTimerSeconds;
     Optional<uint16_t> mCASEFailsafeTimerSeconds;
-    Optional<app::Clusters::GeneralCommissioning::RegulatoryLocationType> mDeviceRegulatoryLocation;
+    Optional<app::Clusters::GeneralCommissioning::RegulatoryLocationTypeEnum> mDeviceRegulatoryLocation;
+    Optional<app::DataModel::List<app::Clusters::TimeSynchronization::Structs::TimeZoneStruct::Type>> mTimeZone;
+    Optional<app::DataModel::List<app::Clusters::TimeSynchronization::Structs::DSTOffsetStruct::Type>> mDSTOffsets;
+    Optional<app::DataModel::Nullable<CharSpan>> mDefaultNTP;
+    Optional<app::DataModel::Nullable<app::Clusters::TimeSynchronization::Structs::FabricScopedTrustedTimeSourceStruct::Type>>
+        mTrustedTimeSource;
     Optional<ByteSpan> mCSRNonce;
     Optional<ByteSpan> mAttestationNonce;
     Optional<WiFiCredentials> mWiFiCreds;
@@ -439,7 +534,7 @@ private:
     Optional<ByteSpan> mRootCert;
     Optional<ByteSpan> mNoc;
     Optional<ByteSpan> mIcac;
-    Optional<AesCcm128Key> mIpk;
+    Optional<IdentityProtectionKey> mIpk;
     Optional<NodeId> mAdminSubject;
     // Items that come from the device in commissioning steps
     Optional<ByteSpan> mAttestationElements;
@@ -449,8 +544,8 @@ private:
     Optional<NodeId> mRemoteNodeId;
     Optional<VendorId> mRemoteVendorId;
     Optional<uint16_t> mRemoteProductId;
-    Optional<app::Clusters::GeneralCommissioning::RegulatoryLocationType> mDefaultRegulatoryLocation;
-    Optional<app::Clusters::GeneralCommissioning::RegulatoryLocationType> mLocationCapability;
+    Optional<app::Clusters::GeneralCommissioning::RegulatoryLocationTypeEnum> mDefaultRegulatoryLocation;
+    Optional<app::Clusters::GeneralCommissioning::RegulatoryLocationTypeEnum> mLocationCapability;
     CompletionStatus completionStatus;
     Credentials::DeviceAttestationDelegate * mDeviceAttestationDelegate =
         nullptr; // Delegate to handle device attestation failures during commissioning
@@ -484,13 +579,13 @@ struct CSRResponse
 
 struct NocChain
 {
-    NocChain(ByteSpan newNoc, ByteSpan newIcac, ByteSpan newRcac, AesCcm128KeySpan newIpk, NodeId newAdminSubject) :
+    NocChain(ByteSpan newNoc, ByteSpan newIcac, ByteSpan newRcac, IdentityProtectionKeySpan newIpk, NodeId newAdminSubject) :
         noc(newNoc), icac(newIcac), rcac(newRcac), ipk(newIpk), adminSubject(newAdminSubject)
     {}
     ByteSpan noc;
     ByteSpan icac;
     ByteSpan rcac;
-    AesCcm128KeySpan ipk;
+    IdentityProtectionKeySpan ipk;
     NodeId adminSubject;
 };
 
@@ -520,10 +615,10 @@ struct GeneralCommissioningInfo
 {
     uint64_t breadcrumb          = 0;
     uint16_t recommendedFailsafe = 0;
-    app::Clusters::GeneralCommissioning::RegulatoryLocationType currentRegulatoryLocation =
-        app::Clusters::GeneralCommissioning::RegulatoryLocationType::kIndoorOutdoor;
-    app::Clusters::GeneralCommissioning::RegulatoryLocationType locationCapability =
-        app::Clusters::GeneralCommissioning::RegulatoryLocationType::kIndoorOutdoor;
+    app::Clusters::GeneralCommissioning::RegulatoryLocationTypeEnum currentRegulatoryLocation =
+        app::Clusters::GeneralCommissioning::RegulatoryLocationTypeEnum::kIndoorOutdoor;
+    app::Clusters::GeneralCommissioning::RegulatoryLocationTypeEnum locationCapability =
+        app::Clusters::GeneralCommissioning::RegulatoryLocationTypeEnum::kIndoorOutdoor;
     ;
 };
 
@@ -532,7 +627,21 @@ struct ReadCommissioningInfo
     NetworkClusters network;
     BasicClusterInfo basic;
     GeneralCommissioningInfo general;
+    bool requiresUTC               = false;
+    bool requiresTimeZone          = false;
+    bool requiresDefaultNTP        = false;
+    bool requiresTrustedTimeSource = false;
+    uint8_t maxTimeZoneSize        = 1;
+    uint8_t maxDSTSize             = 1;
+};
+struct MatchingFabricInfo
+{
     NodeId nodeId = kUndefinedNodeId;
+};
+
+struct TimeZoneResponseInfo
+{
+    bool requiresDSTOffsets;
 };
 
 struct AttestationErrorInfo
@@ -543,16 +652,16 @@ struct AttestationErrorInfo
 
 struct CommissioningErrorInfo
 {
-    CommissioningErrorInfo(app::Clusters::GeneralCommissioning::CommissioningError result) : commissioningError(result) {}
-    app::Clusters::GeneralCommissioning::CommissioningError commissioningError;
+    CommissioningErrorInfo(app::Clusters::GeneralCommissioning::CommissioningErrorEnum result) : commissioningError(result) {}
+    app::Clusters::GeneralCommissioning::CommissioningErrorEnum commissioningError;
 };
 
 struct NetworkCommissioningStatusInfo
 {
-    NetworkCommissioningStatusInfo(app::Clusters::NetworkCommissioning::NetworkCommissioningStatus result) :
+    NetworkCommissioningStatusInfo(app::Clusters::NetworkCommissioning::NetworkCommissioningStatusEnum result) :
         networkCommissioningStatus(result)
     {}
-    app::Clusters::NetworkCommissioning::NetworkCommissioningStatus networkCommissioningStatus;
+    app::Clusters::NetworkCommissioning::NetworkCommissioningStatusEnum networkCommissioningStatus;
 };
 
 class CommissioningDelegate
@@ -561,8 +670,13 @@ public:
     virtual ~CommissioningDelegate(){};
     /* CommissioningReport is returned after each commissioning step is completed. The reports for each step are:
      * kReadCommissioningInfo - ReadCommissioningInfo
+     * kCheckForMatchingFabric = MatchingFabricInfo
      * kArmFailsafe: CommissioningErrorInfo if there is an error
      * kConfigRegulatory: CommissioningErrorInfo if there is an error
+     * kConfigureUTCTime: None
+     * kConfigureTimeZone: TimeZoneResponseInfo
+     * kConfigureDSTOffset: None
+     * kConfigureDefaultNTP: None
      * kSendPAICertificateRequest: RequestedCertificate
      * kSendDACCertificateRequest: RequestedCertificate
      * kSendAttestationRequest: AttestationResponse
@@ -571,6 +685,7 @@ public:
      * kGenerateNOCChain: NocChain
      * kSendTrustedRootCert: None
      * kSendNOC: none
+     * kConfigureTrustedTimeSource: None
      * kWiFiNetworkSetup: NetworkCommissioningStatusInfo if there is an error
      * kThreadNetworkSetup: NetworkCommissioningStatusInfo if there is an error
      * kWiFiNetworkEnable: NetworkCommissioningStatusInfo if there is an error
@@ -579,9 +694,9 @@ public:
      * kSendComplete: CommissioningErrorInfo if there is an error
      * kCleanup: none
      */
-    struct CommissioningReport
-        : Variant<RequestedCertificate, AttestationResponse, CSRResponse, NocChain, OperationalNodeFoundData, ReadCommissioningInfo,
-                  AttestationErrorInfo, CommissioningErrorInfo, NetworkCommissioningStatusInfo>
+    struct CommissioningReport : Variant<RequestedCertificate, AttestationResponse, CSRResponse, NocChain, OperationalNodeFoundData,
+                                         ReadCommissioningInfo, AttestationErrorInfo, CommissioningErrorInfo,
+                                         NetworkCommissioningStatusInfo, MatchingFabricInfo, TimeZoneResponseInfo>
     {
         CommissioningReport() : stageCompleted(CommissioningStage::kError) {}
         CommissioningStage stageCompleted;

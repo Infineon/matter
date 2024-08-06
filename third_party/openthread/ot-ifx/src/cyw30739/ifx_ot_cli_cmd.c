@@ -157,9 +157,12 @@ static void ifx_ot_cli_cmd_handler_serial_flash_usage_display(void)
     otCliOutputFormat("Usage:");
     otCliOutputFormat("  ifx_serial_flash api API_SOURCE\n");
     otCliOutputFormat("  ifx_serial_flash init\n");
-    otCliOutputFormat("  ifx_serial_flash read ADDR LENGTH, ex: ifx_serial_flash 0x00010000 256\n");
-    otCliOutputFormat("  ifx_serial_flash write ADDR LENGTH, ex: ifx_serial_flash 0x00010000 256\n");
-    otCliOutputFormat("  ifx_serial_flash erase START_SECTOR SECTOR_NUM, ex: ifx_serial_flash 0 1\n");
+    otCliOutputFormat("  ifx_serial_flash read ADDR LENGTH, ex: ifx_serial_flash read 0x00001000 256\n");
+    /* CLI input length must < 32 bytes */
+    otCliOutputFormat("  ifx_serial_flash write ADDR LENGTH, ex: ifx_serial_flash write 0x00001000 16 12 34 56 78 12 "
+                      "34 56 78 12 34 56 78 12 34 56 78\n");
+
+    otCliOutputFormat("  ifx_serial_flash erase START_SECTOR SECTOR_NUM, ex: ifx_serial_flash erase 0 1\n");
     otCliOutputFormat("Note: The maximum value of LENGTH is %u\n", IFX_OT_CLI_CMD_SERIAL_FLASH_BUFFER_LEN);
 }
 

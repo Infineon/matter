@@ -26,7 +26,7 @@
 #include <app/AppBuildConfig.h>
 #include <app/util/basic-types.h>
 #include <lib/core/CHIPCore.h>
-#include <lib/core/CHIPTLV.h>
+#include <lib/core/TLV.h>
 #include <lib/support/CodeUtils.h>
 #include <lib/support/logging/CHIPLogging.h>
 
@@ -81,9 +81,9 @@ public:
     /**
      *  @brief Mark the end of this CommandDataIB
      *
-     *  @return A reference to *this
+     *  @return The builder's final status.
      */
-    CommandDataIB::Builder & EndOfCommandDataIB();
+    CHIP_ERROR EndOfCommandDataIB();
 
 private:
     CommandPathIB::Builder mPath;

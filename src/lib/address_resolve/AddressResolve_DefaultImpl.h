@@ -26,7 +26,7 @@ namespace chip {
 namespace AddressResolve {
 namespace Impl {
 
-constexpr uint8_t kNodeLookupResultsLen = CHIP_CONFIG_MDNS_RESOLVE_LOOKUP_RESULTS;
+inline constexpr uint8_t kNodeLookupResultsLen = CHIP_CONFIG_MDNS_RESOLVE_LOOKUP_RESULTS;
 
 enum class NodeLookupResult
 {
@@ -183,7 +183,6 @@ public:
 
 private:
     static void OnResolveTimer(System::Layer * layer, void * context) { static_cast<Resolver *>(context)->HandleTimer(); }
-    static void OnTryNextResult(System::Layer * layer, void * context);
 
     /// Timer on lookup node events: min and max search times.
     void HandleTimer();
