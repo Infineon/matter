@@ -22,7 +22,7 @@
 #include "StructBuilder.h"
 #include "StructParser.h"
 
-#include <app/AppBuildConfig.h>
+#include <app/AppConfig.h>
 #include <app/util/basic-types.h>
 #include <lib/core/CHIPCore.h>
 #include <lib/core/TLV.h>
@@ -104,6 +104,17 @@ public:
      *  @return Our The builder's final status.
      */
     CHIP_ERROR EndOfAttributeDataIB();
+
+    /**
+     *  @brief Get number of bytes required in the buffer to allow EndOfAttributeDataIB() to succeed.
+     *
+     *  @return Expected number of bytes required in the buffer to successfully execute EndOfAttributeDataIB()
+     */
+    static constexpr uint16_t GetSizeToEndAttributeDataIB()
+    {
+        uint16_t kEndOfAttributeDataIBSize = 1;
+        return kEndOfAttributeDataIBSize;
+    };
 
 private:
     AttributePathIB::Builder mPath;

@@ -73,28 +73,31 @@ public:
         NodeId mNodeId;
         FabricIndex mFabricIndex;
         SubscriptionId mSubscriptionId;
+#if CHIP_CONFIG_SUBSCRIPTION_TIMEOUT_RESUMPTION
+        uint32_t mResumptionRetries;
+#endif
         uint16_t mMinInterval;
         uint16_t mMaxInterval;
         bool mFabricFiltered;
         Platform::ScopedMemoryBufferWithSize<AttributePathParamsValues> mAttributePaths;
         Platform::ScopedMemoryBufferWithSize<EventPathParamsValues> mEventPaths;
-        CHIP_ERROR SetAttributePaths(const ObjectList<AttributePathParams> * pAttributePathList)
+        CHIP_ERROR SetAttributePaths(const SingleLinkedListNode<AttributePathParams> * pAttributePathList)
         {
             mAttributePaths.Free();
             if (!pAttributePathList)
             {
                 return CHIP_NO_ERROR;
             }
-            const ObjectList<AttributePathParams> * attributePath = pAttributePathList;
-            size_t attributePathCount                             = 0;
+            const SingleLinkedListNode<AttributePathParams> * attributePath = pAttributePathList;
+            size_t attributePathCount                                       = 0;
             while (attributePath)
             {
                 attributePathCount++;
                 attributePath = attributePath->mpNext;
             }
-            ReturnErrorCodeIf((attributePathCount * sizeof(AttributePathParamsValues)) > UINT16_MAX, CHIP_ERROR_NO_MEMORY);
+            VerifyOrReturnError((attributePathCount * sizeof(AttributePathParamsValues)) <= UINT16_MAX, CHIP_ERROR_NO_MEMORY);
             mAttributePaths.Calloc(attributePathCount);
-            ReturnErrorCodeIf(mAttributePaths.Get() == nullptr, CHIP_ERROR_NO_MEMORY);
+            VerifyOrReturnError(mAttributePaths.Get() != nullptr, CHIP_ERROR_NO_MEMORY);
             attributePath = pAttributePathList;
             for (size_t i = 0; i < attributePathCount; i++)
             {
@@ -103,23 +106,23 @@ public:
             }
             return CHIP_NO_ERROR;
         }
-        CHIP_ERROR SetEventPaths(const ObjectList<EventPathParams> * pEventPathList)
+        CHIP_ERROR SetEventPaths(const SingleLinkedListNode<EventPathParams> * pEventPathList)
         {
             mEventPaths.Free();
             if (!pEventPathList)
             {
                 return CHIP_NO_ERROR;
             }
-            const ObjectList<EventPathParams> * eventPath = pEventPathList;
-            size_t eventPathCount                         = 0;
+            const SingleLinkedListNode<EventPathParams> * eventPath = pEventPathList;
+            size_t eventPathCount                                   = 0;
             while (eventPath)
             {
                 eventPathCount++;
                 eventPath = eventPath->mpNext;
             }
-            ReturnErrorCodeIf((eventPathCount * sizeof(EventPathParamsValues)) > UINT16_MAX, CHIP_ERROR_NO_MEMORY);
+            VerifyOrReturnError((eventPathCount * sizeof(EventPathParamsValues)) <= UINT16_MAX, CHIP_ERROR_NO_MEMORY);
             mEventPaths.Calloc(eventPathCount);
-            ReturnErrorCodeIf(mEventPaths.Get() == nullptr, CHIP_ERROR_NO_MEMORY);
+            VerifyOrReturnError(mEventPaths.Get() != nullptr, CHIP_ERROR_NO_MEMORY);
             eventPath = pEventPathList;
             for (size_t i = 0; i < eventPathCount; i++)
             {

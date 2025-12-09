@@ -20,9 +20,9 @@
 #include <app-common/zap-generated/ids/Attributes.h>
 #include <app-common/zap-generated/ids/Clusters.h>
 #include <app/AttributeAccessInterface.h>
+#include <app/AttributeAccessInterfaceRegistry.h>
 #include <app/CommandHandler.h>
 #include <app/ConcreteCommandPath.h>
-#include <app/util/af.h>
 #include <app/util/attribute-storage.h>
 #include <lib/core/Optional.h>
 #include <platform/DiagnosticDataProvider.h>
@@ -36,11 +36,11 @@ using chip::DeviceLayer::DiagnosticDataProvider;
 
 namespace {
 
-class EthernetDiagosticsAttrAccess : public AttributeAccessInterface
+class EthernetDiagnosticsAttrAccess : public AttributeAccessInterface
 {
 public:
     // Register for the EthernetNetworkDiagnostics cluster on all endpoints.
-    EthernetDiagosticsAttrAccess() : AttributeAccessInterface(Optional<EndpointId>::Missing(), EthernetNetworkDiagnostics::Id) {}
+    EthernetDiagnosticsAttrAccess() : AttributeAccessInterface(Optional<EndpointId>::Missing(), EthernetNetworkDiagnostics::Id) {}
 
     CHIP_ERROR Read(const ConcreteReadAttributePath & aPath, AttributeValueEncoder & aEncoder) override;
 
@@ -54,8 +54,8 @@ private:
 };
 
 template <typename T>
-CHIP_ERROR EthernetDiagosticsAttrAccess::ReadIfSupported(CHIP_ERROR (DiagnosticDataProvider::*getter)(T &),
-                                                         AttributeValueEncoder & aEncoder)
+CHIP_ERROR EthernetDiagnosticsAttrAccess::ReadIfSupported(CHIP_ERROR (DiagnosticDataProvider::*getter)(T &),
+                                                          AttributeValueEncoder & aEncoder)
 {
     T data;
     CHIP_ERROR err = (DeviceLayer::GetDiagnosticDataProvider().*getter)(data);
@@ -71,15 +71,16 @@ CHIP_ERROR EthernetDiagosticsAttrAccess::ReadIfSupported(CHIP_ERROR (DiagnosticD
     return aEncoder.Encode(data);
 }
 
-CHIP_ERROR EthernetDiagosticsAttrAccess::ReadPHYRate(AttributeValueEncoder & aEncoder)
+CHIP_ERROR EthernetDiagnosticsAttrAccess::ReadPHYRate(AttributeValueEncoder & aEncoder)
 {
     Attributes::PHYRate::TypeInfo::Type pHYRate;
-    auto value = EmberAfPHYRateEnum::EMBER_ZCL_PHY_RATE_ENUM_RATE10_M;
+    auto value = app::Clusters::EthernetNetworkDiagnostics::PHYRateEnum::kRate10M;
 
     if (DeviceLayer::GetDiagnosticDataProvider().GetEthPHYRate(value) == CHIP_NO_ERROR)
     {
         pHYRate.SetNonNull(value);
-        ChipLogProgress(Zcl, "The current nominal, usable speed at the top of the physical layer of the Node: %d", value);
+        ChipLogProgress(Zcl, "The current nominal, usable speed at the top of the physical layer of the Node: %d",
+                        chip::to_underlying(value));
     }
     else
     {
@@ -89,7 +90,7 @@ CHIP_ERROR EthernetDiagosticsAttrAccess::ReadPHYRate(AttributeValueEncoder & aEn
     return aEncoder.Encode(pHYRate);
 }
 
-CHIP_ERROR EthernetDiagosticsAttrAccess::ReadFullDuplex(AttributeValueEncoder & aEncoder)
+CHIP_ERROR EthernetDiagnosticsAttrAccess::ReadFullDuplex(AttributeValueEncoder & aEncoder)
 {
     Attributes::FullDuplex::TypeInfo::Type fullDuplex;
     bool value = false;
@@ -107,7 +108,7 @@ CHIP_ERROR EthernetDiagosticsAttrAccess::ReadFullDuplex(AttributeValueEncoder & 
     return aEncoder.Encode(fullDuplex);
 }
 
-CHIP_ERROR EthernetDiagosticsAttrAccess::ReadCarrierDetect(AttributeValueEncoder & aEncoder)
+CHIP_ERROR EthernetDiagnosticsAttrAccess::ReadCarrierDetect(AttributeValueEncoder & aEncoder)
 {
     Attributes::CarrierDetect::TypeInfo::Type carrierDetect;
     bool value = false;
@@ -126,9 +127,9 @@ CHIP_ERROR EthernetDiagosticsAttrAccess::ReadCarrierDetect(AttributeValueEncoder
     return aEncoder.Encode(carrierDetect);
 }
 
-EthernetDiagosticsAttrAccess gAttrAccess;
+EthernetDiagnosticsAttrAccess gAttrAccess;
 
-CHIP_ERROR EthernetDiagosticsAttrAccess::Read(const ConcreteReadAttributePath & aPath, AttributeValueEncoder & aEncoder)
+CHIP_ERROR EthernetDiagnosticsAttrAccess::Read(const ConcreteReadAttributePath & aPath, AttributeValueEncoder & aEncoder)
 {
     if (aPath.mClusterId != EthernetNetworkDiagnostics::Id)
     {
@@ -185,5 +186,10 @@ bool emberAfEthernetNetworkDiagnosticsClusterResetCountsCallback(app::CommandHan
 
 void MatterEthernetNetworkDiagnosticsPluginServerInitCallback()
 {
-    registerAttributeAccessOverride(&gAttrAccess);
+    AttributeAccessInterfaceRegistry::Instance().Register(&gAttrAccess);
+}
+
+void MatterEthernetNetworkDiagnosticsPluginServerShutdownCallback()
+{
+    AttributeAccessInterfaceRegistry::Instance().Unregister(&gAttrAccess);
 }

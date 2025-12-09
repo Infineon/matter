@@ -16,18 +16,25 @@
 
 #include <lib/shell/Commands.h>
 #include <lib/shell/Engine.h>
+#include <lib/shell/SubShellCommand.h>
 #include <lib/support/logging/CHIPLogging.h>
 #include <platform/CHIPDeviceLayer.h>
 #include <platform/DiagnosticDataProvider.h>
 #include <system/SystemStats.h>
+
+#if CHIP_HAVE_CONFIG_H
+#include <crypto/CryptoBuildConfig.h>
+#endif // CHIP_HAVE_CONFIG_H
+
+#if CHIP_CRYPTO_MBEDTLS
+#include <mbedtls/memory_buffer_alloc.h>
+#endif
 
 using namespace chip;
 
 namespace chip {
 namespace Shell {
 namespace {
-
-Shell::Engine sSubShell;
 
 CHIP_ERROR StatPeakHandler(int argc, char ** argv)
 {
@@ -45,6 +52,15 @@ CHIP_ERROR StatPeakHandler(int argc, char ** argv)
         ReturnErrorOnFailure(DeviceLayer::GetDiagnosticDataProvider().GetCurrentHeapHighWatermark(heapWatermark));
         streamer_printf(streamer_get(), "Heap allocated bytes: %u\r\n", static_cast<unsigned>(heapWatermark));
     }
+
+#if CHIP_CRYPTO_MBEDTLS && defined(MBEDTLS_MEMORY_DEBUG)
+    size_t maxUsed   = 0;
+    size_t maxBlocks = 0;
+
+    mbedtls_memory_buffer_alloc_max_get(&maxUsed, &maxBlocks);
+
+    streamer_printf(streamer_get(), "mbedTLS heap allocated bytes: %u\r\n", static_cast<unsigned>(maxUsed));
+#endif
 
     return CHIP_NO_ERROR;
 }
@@ -64,27 +80,24 @@ CHIP_ERROR StatResetHandler(int argc, char ** argv)
         ReturnErrorOnFailure(DeviceLayer::GetDiagnosticDataProvider().ResetWatermarks());
     }
 
+#if CHIP_CRYPTO_MBEDTLS && defined(MBEDTLS_MEMORY_DEBUG)
+    mbedtls_memory_buffer_alloc_max_reset();
+#endif
+
     return CHIP_NO_ERROR;
 }
 
-CHIP_ERROR StatHandler(int argc, char ** argv)
-{
-    return sSubShell.ExecCommand(argc, argv);
-}
 } // namespace
 
 void RegisterStatCommands()
 {
-    // Register subcommands of the `stat` commands.
-    static const shell_command_t subCommands[] = {
-        { &StatPeakHandler, "peak", "Print peak usage of system resources. Usage: stat peak" },
-        { &StatResetHandler, "reset", "Reset peak usage of system resources. Usage: stat reset" },
+    static constexpr Command subCommands[] = {
+        { &StatPeakHandler, "peak", "Print peak usage of system resources" },
+        { &StatResetHandler, "reset", "Reset peak usage of system resources" },
     };
 
-    sSubShell.RegisterCommands(subCommands, ArraySize(subCommands));
-
-    // Register the root `stat` command in the top-level shell.
-    static const shell_command_t statCommand = { &StatHandler, "stat", "Statistics commands" };
+    static constexpr Command statCommand = { &SubShellCommand<MATTER_ARRAY_SIZE(subCommands), subCommands>, "stat",
+                                             "Statistics commands" };
 
     Engine::Root().RegisterCommands(&statCommand, 1);
 }

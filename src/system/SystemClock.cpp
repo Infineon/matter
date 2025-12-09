@@ -61,6 +61,39 @@ ClockBase * gClockBase = &gClockImpl;
 
 } // namespace Internal
 
+Timestamp ClockBase::GetMonotonicTimestamp()
+{
+    // Below implementation uses `__atomic_*` API which has wider support than
+    // <atomic> on embedded platforms, so that embedded platforms can use
+    // it by widening the #ifdefs later.
+#if CHIP_DEVICE_LAYER_USE_ATOMICS_FOR_CLOCK
+    uint64_t prevTimestamp = __atomic_load_n(&mLastTimestamp, __ATOMIC_SEQ_CST);
+    static_assert(sizeof(prevTimestamp) == sizeof(Timestamp), "Must have scalar match between timestamp and uint64_t for atomics.");
+
+    // Force a reorder barrier to prevent GetMonotonicMilliseconds64() from being
+    // optimizer-called before prevTimestamp loading, so that newTimestamp acquisition happens-after
+    // the prevTimestamp load.
+    __atomic_signal_fence(__ATOMIC_SEQ_CST);
+#else
+    uint64_t prevTimestamp = mLastTimestamp;
+#endif // CHIP_DEVICE_LAYER_USE_ATOMICS_FOR_CLOCK
+
+    Timestamp newTimestamp = GetMonotonicMilliseconds64();
+
+    // Need to guarantee the invariant that monotonic clock never goes backwards, which would break multiple system
+    // assumptions which use these clocks.
+    VerifyOrDie(newTimestamp.count() >= prevTimestamp);
+
+#if CHIP_DEVICE_LAYER_USE_ATOMICS_FOR_CLOCK
+    // newTimestamp guaranteed to never be < the last timestamp.
+    __atomic_store_n(&mLastTimestamp, newTimestamp.count(), __ATOMIC_SEQ_CST);
+#else
+    mLastTimestamp         = newTimestamp.count();
+#endif // CHIP_DEVICE_LAYER_USE_ATOMICS_FOR_CLOCK
+
+    return newTimestamp;
+}
+
 #if !CHIP_SYSTEM_CONFIG_PLATFORM_PROVIDES_TIME
 
 #if CHIP_SYSTEM_CONFIG_USE_POSIX_TIME_FUNCTS
@@ -247,6 +280,30 @@ static_assert(std::numeric_limits<Milliseconds32::rep>::digits >= 32, "Milliseco
 static_assert(std::numeric_limits<Seconds64::rep>::digits >= 64, "Seconds64 must be at least 64 bits");
 static_assert(std::numeric_limits<Seconds32::rep>::digits >= 32, "Seconds32 must be at least 32 bits");
 static_assert(std::numeric_limits<Seconds16::rep>::digits >= 16, "Seconds16 must be at least 16 bits");
+
+CHIP_ERROR GetClock_MatterEpochS(uint32_t & aMatterEpoch)
+{
+    aMatterEpoch = 0;
+
+    Milliseconds64 cTMs;
+    CHIP_ERROR err = System::SystemClock().GetClock_RealTimeMS(cTMs);
+
+    if (err != CHIP_NO_ERROR)
+    {
+        ChipLogError(DeviceLayer, "Unable to get current time - err:%" CHIP_ERROR_FORMAT, err.Format());
+        return err;
+    }
+
+    auto unixEpoch = std::chrono::duration_cast<Seconds32>(cTMs).count();
+    if (!UnixEpochToChipEpochTime(unixEpoch, aMatterEpoch))
+    {
+        ChipLogError(DeviceLayer, "Unable to convert Unix Epoch time to Matter Epoch Time: unixEpoch (%u)",
+                     static_cast<unsigned int>(unixEpoch));
+        return CHIP_ERROR_INCORRECT_STATE;
+    }
+
+    return CHIP_NO_ERROR;
+}
 
 } // namespace Clock
 } // namespace System

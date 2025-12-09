@@ -27,10 +27,6 @@
  *
  */
 
-#ifndef __STDC_LIMIT_MACROS
-#define __STDC_LIMIT_MACROS
-#endif
-
 #include <inet/IPAddress.h>
 
 #include <inet/InetError.h>
@@ -41,6 +37,13 @@
 
 #include <stdint.h>
 #include <string.h>
+
+#if CHIP_SYSTEM_CONFIG_USE_NETXDUO
+extern   "C" {
+#include <nx_ip.h>
+#include <nx_ipv6.h>
+}
+#endif // CHIP_SYSTEM_CONFIG_USE_NETXDUO
 
 namespace chip {
 namespace Inet {
@@ -57,7 +60,7 @@ bool IPAddress::operator!=(const IPAddress & other) const
     return Addr[0] != other.Addr[0] || Addr[1] != other.Addr[1] || Addr[2] != other.Addr[2] || Addr[3] != other.Addr[3];
 }
 
-#if CHIP_SYSTEM_CONFIG_USE_LWIP && !CHIP_SYSTEM_CONFIG_USE_OPEN_THREAD_ENDPOINT
+#if CHIP_SYSTEM_CONFIG_USE_LWIP && !CHIP_SYSTEM_CONFIG_USE_OPENTHREAD_ENDPOINT
 
 IPAddress::IPAddress(const ip6_addr_t & ipv6Addr)
 {
@@ -202,6 +205,174 @@ ip6_addr_t IPAddress::ToIPv6() const
 
 #endif // CHIP_SYSTEM_CONFIG_USE_LWIP
 
+#if CHIP_SYSTEM_CONFIG_USE_NETXDUO
+
+IPAddress::IPAddress(const ULONG (& ipv6Addr)[4])
+{
+    static_assert(sizeof(ipv6Addr) == sizeof(Addr), "ip6_addr_t size mismatch");
+    memcpy(Addr, &ipv6Addr, sizeof(ipv6Addr));
+}
+
+#if INET_CONFIG_ENABLE_IPV4 && !NX_DISABLE_IPV4
+
+IPAddress::IPAddress(const ULONG & ipv4Addr)
+{
+    Addr[0] = 0;
+    Addr[1] = 0;
+    Addr[2] = htonl(0xFFFF);
+    Addr[3] = ipv4Addr;
+}
+
+#endif // INET_CONFIG_ENABLE_IPV4 && !NX_DISABLE_IPV4
+
+IPAddress::IPAddress(const NXD_ADDRESS & addr)
+{
+    switch (addr.nxd_ip_version)
+    {
+#if INET_CONFIG_ENABLE_IPV4 && !NX_DISABLE_IPV4
+    case NX_IP_VERSION_V4:
+        *this = IPAddress(htonl(addr.nxd_ip_address.v4));
+        break;
+#endif // INET_CONFIG_ENABLE_IPV4
+
+    case NX_IP_VERSION_V6:
+        // NetXDuo addresses are in host order format.
+        ULONG v6[4];
+        COPY_IPV6_ADDRESS(const_cast<ULONG *>(addr.nxd_ip_address.v6), v6);
+        NX_IPV6_ADDRESS_CHANGE_ENDIAN(v6);
+        *this = IPAddress(v6);
+        break;
+
+    default:
+        *this = Any;
+        break;
+    }
+}
+
+#if INET_CONFIG_ENABLE_IPV4
+
+ULONG IPAddress::ToIPv4() const
+{
+    // Don't convert to host byte order here since we don't know whether the result will
+    // be used in a NetXDuo API.
+    ULONG ipAddr;
+    memcpy(&ipAddr, &Addr[3], sizeof(ipAddr));
+
+    return ipAddr;
+}
+
+#endif // INET_CONFIG_ENABLE_IPV4
+
+NXD_ADDRESS IPAddress::ToNetXDuoAddr() const
+{
+    NXD_ADDRESS ret;
+
+    switch (Type())
+    {
+#if INET_CONFIG_ENABLE_IPV4
+    case IPAddressType::kIPv4:
+        ret.nxd_ip_version    = NX_IP_VERSION_V4;
+        ret.nxd_ip_address.v4 = ntohl(IPAddress::ToIPv4());
+        break;
+#endif // INET_CONFIG_ENABLE_IPV4
+
+    case IPAddressType::kIPv6:
+        ret = IPAddress::ToIPv6();
+        break;
+
+    default:
+        ret.nxd_ip_version       = NX_IP_VERSION_V6;
+        ret.nxd_ip_address.v6[0] = 0;
+        ret.nxd_ip_address.v6[1] = 0;
+        ret.nxd_ip_address.v6[2] = 0;
+        ret.nxd_ip_address.v6[3] = 0;
+        break;
+    }
+
+    return ret;
+}
+
+CHIP_ERROR IPAddress::ToNetXDuoAddr(IPAddressType addressType, NXD_ADDRESS & outAddress) const
+{
+    VerifyOrReturnError(addressType != IPAddressType::kUnknown, CHIP_ERROR_INVALID_ARGUMENT);
+
+    switch (Type())
+    {
+#if INET_CONFIG_ENABLE_IPV4
+    case IPAddressType::kIPv4:
+        outAddress.nxd_ip_version    = NX_IP_VERSION_V4;
+        outAddress.nxd_ip_address.v4 = ntohl(IPAddress::ToIPv4());
+        return (addressType == IPAddressType::kIPv6) ? INET_ERROR_WRONG_ADDRESS_TYPE : CHIP_NO_ERROR;
+#endif // INET_CONFIG_ENABLE_IPV4
+
+    case IPAddressType::kIPv6:
+        outAddress = IPAddress::ToIPv6();
+#if INET_CONFIG_ENABLE_IPV4
+        return (addressType == IPAddressType::kIPv4) ? INET_ERROR_WRONG_ADDRESS_TYPE : CHIP_NO_ERROR;
+#else
+        return CHIP_NO_ERROR;
+#endif // INET_CONFIG_ENABLE_IPV4
+
+    case IPAddressType::kAny:
+#if INET_CONFIG_ENABLE_IPV4
+        if (addressType == IPAddressType::kIPv4)
+        {
+            outAddress.nxd_ip_version    = NX_IP_VERSION_V4;
+            outAddress.nxd_ip_address.v4 = 0;
+            return CHIP_NO_ERROR;
+        }
+#endif // INET_CONFIG_ENABLE_IPV4
+        outAddress.nxd_ip_version = NX_IP_VERSION_V6;
+        outAddress.nxd_ip_address.v6[0] = 0;
+        outAddress.nxd_ip_address.v6[1] = 0;
+        outAddress.nxd_ip_address.v6[2] = 0;
+        outAddress.nxd_ip_address.v6[3] = 0;
+        return CHIP_NO_ERROR;
+
+    default:
+        return INET_ERROR_WRONG_ADDRESS_TYPE;
+    }
+}
+
+ULONG IPAddress::ToNetXDuoAddrType(IPAddressType typ)
+{
+    ULONG ret;
+
+    switch (typ)
+    {
+#if INET_CONFIG_ENABLE_IPV4
+    case IPAddressType::kIPv4:
+        ret = NX_IP_VERSION_V4;
+        break;
+#endif // INET_CONFIG_ENABLE_IPV4
+
+    case IPAddressType::kIPv6:
+        ret = NX_IP_VERSION_V6;
+        break;
+
+    default:
+        ret = 0;
+        break;
+    }
+
+    return ret;
+}
+
+NXD_ADDRESS IPAddress::ToIPv6() const
+{
+    NXD_ADDRESS ipAddr = {};
+    static_assert(sizeof(ipAddr.nxd_ip_address.v6) == sizeof(Addr), "NXD_ADDRESS size mismatch");
+    memcpy(ipAddr.nxd_ip_address.v6, Addr, sizeof(ipAddr.nxd_ip_address.v6));
+    ipAddr.nxd_ip_version = NX_IP_VERSION_V6;
+
+    // NetXDuo addresses are in host order format.
+    NX_IPV6_ADDRESS_CHANGE_ENDIAN(ipAddr.nxd_ip_address.v6);
+
+    return ipAddr;
+}
+
+#endif // CHIP_SYSTEM_CONFIG_USE_NETXDUO
+
 #if CHIP_SYSTEM_CONFIG_USE_SOCKETS || CHIP_SYSTEM_CONFIG_USE_NETWORK_FRAMEWORK
 
 #if INET_CONFIG_ENABLE_IPV4
@@ -256,7 +427,7 @@ CHIP_ERROR IPAddress::GetIPAddressFromSockAddr(const SockAddrWithoutStorage & so
 
 #endif // CHIP_SYSTEM_CONFIG_USE_SOCKETS || CHIP_SYSTEM_CONFIG_USE_NETWORK_FRAMEWORK
 
-#if CHIP_SYSTEM_CONFIG_USE_OPEN_THREAD_ENDPOINT
+#if CHIP_SYSTEM_CONFIG_USE_OPENTHREAD_ENDPOINT
 IPAddress::IPAddress(const otIp6Address & ipv6Addr)
 {
     static_assert(sizeof(ipv6Addr.mFields.m32) == sizeof(Addr), "otIp6Address size mismatch");
@@ -277,7 +448,7 @@ IPAddress IPAddress::FromOtAddr(const otIp6Address & address)
     memcpy(addr.Addr, address.mFields.m32, sizeof(addr.Addr));
     return addr;
 }
-#endif // CHIP_SYSTEM_CONFIG_USE_OPEN_THREAD_ENDPOINT
+#endif // CHIP_SYSTEM_CONFIG_USE_OPENTHREAD_ENDPOINT
 
 // Is address an IPv4 address encoded in IPv6 format?
 bool IPAddress::IsIPv4() const
@@ -323,7 +494,7 @@ bool IPAddress::IsIPv6GlobalUnicast() const
 // Is address an IPv6 Unique Local Address?
 bool IPAddress::IsIPv6ULA() const
 {
-    return (ntohl(Addr[0]) & 0xFF000000U) == 0xFD000000U;
+    return (ntohl(Addr[0]) & 0xFE000000U) == 0xFC000000U;
 }
 
 // Is address an IPv6 Link-local Address?

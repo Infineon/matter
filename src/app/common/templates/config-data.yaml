@@ -1,15 +1,3 @@
-WeakEnums:
-    # Allow-list of enums that we generate as enums, not enum classes.
-    # The goal is to drive this down to 0.
-    - BarrierControlBarrierPosition
-    - BarrierControlMovingState
-    - ColorControlOptions
-    - ColorMode
-    - EnhancedColorMode
-    - MoveMode
-    - PHYRateEnum
-    - StepMode
-
 EnumsNotUsedAsTypeInXML:
     # List of enums that are not used as a type in XML. By adding an enum
     # to this list you prevent incorrectly assuming from code that you are
@@ -24,23 +12,57 @@ EnumsNotUsedAsTypeInXML:
     - "RvcCleanMode::StatusCode"
     - "RvcOperationalState::OperationalStateEnum"
     - "RvcOperationalState::ErrorStateEnum"
+    - "EnergyEvseMode::ModeTag"
+    - "WaterHeaterMode::ModeTag"
+    - "DeviceEnergyManagementMode::ModeTag"
 
 CommandHandlerInterfaceOnlyClusters:
     # List of clusters that are implemented entirely with
     # CommandHandlerInterface and hence do not need generated command dispatch.
     # This uses asUpperCamelCase versions of the cluster name.
     - Network Commissioning
-    - Scenes
+    - Scenes Management
     - RVC Run Mode
     - RVC Clean Mode
+    - Service Area
     - Dishwasher Mode
     - Laundry Washer Mode
+    - Oven Mode
+    - Oven Cavity Operational State
     - Refrigerator And Temperature Controlled Cabinet Mode
     - Operational State
     - Activated Carbon Filter Monitoring
     - HEPA Filter Monitoring
     - RVC Operational State
     - Sample MEI
+    - Microwave Oven Control
+    - Chime
+    - Camera AV Stream Management
+    - Commissioner Control
+    - Commodity Price
+    - Energy EVSE
+    - Energy EVSE Mode
+    - Device Energy Management
+    - Device Energy Management Mode
+    - Electrical Power Measurement
+    - Electrical Energy Measurement
+    - Wi-Fi Network Management
+    - Thread Border Router Management
+    - Thread Network Directory
+    - Water Heater Management
+    - Water Heater Mode
+    - WebRTC Transport Provider
+    - WebRTC Transport Requestor
+    - General Commissioning
+    - General Diagnostics
+    - Software Diagnostics
+    - Wi-Fi Network Diagnostics
+    - Camera AV Settings User Level Management
+    - Administrator Commissioning
+    - Actions
+    - Closure Control
+    - Closure Dimension
+    - OTA Software Update Provider
 
 # We need a more configurable way of deciding which clusters have which init functions....
 # See https://github.com/project-chip/connectedhomeip/issues/4369
@@ -57,14 +79,16 @@ ClustersWithInitFunctions:
     - Thermostat
     - Mode Select
     - Sample MEI
+    - Scenes Management
 
 ClustersWithAttributeChangedFunctions:
-    - Bridged Device Basic
+    - Bridged Device Basic Information
     - Door Lock
     - Identify
     - Pump Configuration and Control
     - Window Covering
     - Fan Control
+    - Thermostat
 
 ClustersWithShutdownFunctions:
     - Barrier Control
@@ -73,6 +97,8 @@ ClustersWithShutdownFunctions:
     - Level Control
     - Color Control
     - Sample MEI
+    - Scenes Management
+    - Thermostat
 
 ClustersWithPreAttributeChangeFunctions:
     - Door Lock
@@ -83,4 +109,6 @@ ClustersWithPreAttributeChangeFunctions:
     - Mode Select
     - Fan Control
     - Thermostat
+    - Energy Preference
     - Laundry Washer Controls
+    - Laundry Dryer Controls

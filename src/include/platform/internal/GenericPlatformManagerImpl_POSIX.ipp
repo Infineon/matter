@@ -107,9 +107,13 @@ void GenericPlatformManagerImpl_POSIX<ImplClass>::_UnlockChipStack()
 #if CHIP_STACK_LOCK_TRACKING_ENABLED
     if (!mChipStackIsLocked)
     {
-        ChipLogError(DeviceLayer, "_UnlockChipStack may error status");
+        ChipLogError(DeviceLayer, "_UnlockChipStack while unlocked");
+#if CHIP_STACK_LOCK_TRACKING_ERROR_FATAL
+        chipDie();
+#endif
     }
-    mChipStackIsLocked = false;
+    mChipStackIsLocked        = false;
+    mChipStackLockOwnerThread = pthread_t();
 #endif
 
     int err = pthread_mutex_unlock(&mChipStackLock);

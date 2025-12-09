@@ -88,6 +88,8 @@ enum
     kPathLength_NotSpecified               = -1,
 };
 
+inline constexpr uint64_t kUseRandomSerialNumber = 0;
+
 enum CertFormat
 {
     kCertFormat_Unknown = 0,
@@ -474,6 +476,7 @@ extern int gNIDChipNodeId;
 extern int gNIDChipFirmwareSigningId;
 extern int gNIDChipICAId;
 extern int gNIDChipRootId;
+extern int gNIDChipVidVerificationSignerId;
 extern int gNIDChipFabricId;
 extern int gNIDChipCASEAuthenticatedTag;
 extern int gNIDChipCurveP256;

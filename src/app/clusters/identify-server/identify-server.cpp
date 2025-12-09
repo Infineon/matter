@@ -24,13 +24,9 @@
 #include <app-common/zap-generated/ids/Commands.h>
 #include <app/CommandHandler.h>
 #include <app/ConcreteCommandPath.h>
-
-#include <app/util/af.h>
-#include <app/util/common.h>
-#include <app/util/error-mapping.h>
-#include <array>
 #include <lib/support/CodeUtils.h>
 #include <platform/CHIPDeviceLayer.h>
+#include <tracing/macros.h>
 
 #if CHIP_DEVICE_LAYER_NONE
 #error "identify requrires a device layer"
@@ -44,6 +40,17 @@ using chip::Protocols::InteractionModel::Status;
 static Identify * firstIdentify = nullptr;
 
 static void onIdentifyClusterTick(chip::System::Layer * systemLayer, void * appState);
+
+// The Q quality rules for the Identify cluster are:
+// 1. When it changes from 0 to any other value and vice versa, or
+// 2. When it is written by a client, or
+// 3. When the value (identifytime) is set by an Identify command.
+//
+// Changes to identifytime by either a write or a command will result
+// in the attribute being set and marked dirty. This covers rules 2 and 3.
+// Rule 1 is handled by not marking the regular countdown changes as dirty
+// in the onIdentifyClusterTick function and only marking the attribute dirty
+// when the identifytime is set to 0.
 
 static Identify * inst(EndpointId endpoint)
 {
@@ -97,19 +104,28 @@ void emberAfIdentifyClusterServerInitCallback(EndpointId endpoint)
 
 static void onIdentifyClusterTick(chip::System::Layer * systemLayer, void * appState)
 {
-    uint16_t identifyTime = 0;
-    Identify * identify   = reinterpret_cast<Identify *>(appState);
+    Identify * identify = reinterpret_cast<Identify *>(appState);
 
     if (nullptr != identify)
     {
         EndpointId endpoint = identify->mEndpoint;
 
-        if (EMBER_ZCL_STATUS_SUCCESS == Attributes::IdentifyTime::Get(endpoint, &identifyTime) && 0 != identifyTime)
+        uint16_t identifyTime = 0;
+        if (Status::Success == Attributes::IdentifyTime::Get(endpoint, &identifyTime) && 0 != identifyTime)
         {
-            identifyTime = static_cast<uint16_t>(identifyTime == 0 ? 0 : identifyTime - 1);
+            auto markDirty = MarkAttributeDirty::kNo;
+            identifyTime   = static_cast<uint16_t>(identifyTime - 1);
+
+            // If the new identify time is 0, we need to mark the attribute dirty so that
+            // the attribute change is reported
+            if (identifyTime == 0)
+            {
+                markDirty = MarkAttributeDirty::kYes;
+            }
+
             // This tick writes the new attribute, which will trigger the Attribute
             // Changed callback.
-            (void) Attributes::IdentifyTime::Set(endpoint, identifyTime);
+            (void) Attributes::IdentifyTime::Set(endpoint, identifyTime, markDirty);
         }
     }
 }
@@ -145,7 +161,7 @@ void MatterIdentifyClusterServerAttributeChangedCallback(const app::ConcreteAttr
             return;
         }
 
-        if (EMBER_ZCL_STATUS_SUCCESS == Attributes::IdentifyTime::Get(endpoint, &identifyTime))
+        if (Status::Success == Attributes::IdentifyTime::Get(endpoint, &identifyTime))
         {
             /* effect identifier changed during identify */
             if (identify->mTargetEffectIdentifier != identify->mCurrentEffectIdentifier)
@@ -196,17 +212,18 @@ void MatterIdentifyClusterServerAttributeChangedCallback(const app::ConcreteAttr
 bool emberAfIdentifyClusterIdentifyCallback(CommandHandler * commandObj, const ConcreteCommandPath & commandPath,
                                             const Commands::Identify::DecodableType & commandData)
 {
+    MATTER_TRACE_SCOPE("IdentifyCommand", "Identify");
     auto & identifyTime = commandData.identifyTime;
 
     // cmd Identify
-    commandObj->AddStatus(commandPath,
-                          ToInteractionModelStatus(Attributes::IdentifyTime::Set(commandPath.mEndpointId, identifyTime)));
+    commandObj->AddStatus(commandPath, Attributes::IdentifyTime::Set(commandPath.mEndpointId, identifyTime));
     return true;
 }
 
 bool emberAfIdentifyClusterTriggerEffectCallback(CommandHandler * commandObj, const ConcreteCommandPath & commandPath,
                                                  const Commands::TriggerEffect::DecodableType & commandData)
 {
+    MATTER_TRACE_SCOPE("TriggerEffect", "Identify");
     auto & effectIdentifier = commandData.effectIdentifier;
     auto & effectVariant    = commandData.effectVariant;
 
@@ -228,8 +245,8 @@ bool emberAfIdentifyClusterTriggerEffectCallback(CommandHandler * commandObj, co
     identify->mEffectVariant          = effectVariant;
 
     /* only call the callback if no identify is in progress */
-    if (nullptr != identify->mOnEffectIdentifier &&
-        EMBER_ZCL_STATUS_SUCCESS == Attributes::IdentifyTime::Get(endpoint, &identifyTime) && 0 == identifyTime)
+    if (nullptr != identify->mOnEffectIdentifier && Status::Success == Attributes::IdentifyTime::Get(endpoint, &identifyTime) &&
+        0 == identifyTime)
     {
         identify->mCurrentEffectIdentifier = identify->mTargetEffectIdentifier;
         identify->mOnEffectIdentifier(identify);
@@ -256,3 +273,4 @@ Identify::~Identify()
 }
 
 void MatterIdentifyPluginServerInitCallback() {}
+void MatterIdentifyPluginServerShutdownCallback() {}

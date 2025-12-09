@@ -16,9 +16,13 @@
  *    limitations under the License.
  */
 #pragma once
+
+#include <app/AttributePathParams.h>
 #include <controller/CommissioneeDeviceProxy.h>
 #include <controller/CommissioningDelegate.h>
 #include <credentials/DeviceAttestationConstructor.h>
+#include <crypto/CHIPCryptoPAL.h>
+#include <lib/support/ScopedBuffer.h>
 #include <protocols/secure_channel/RendezvousParameters.h>
 
 namespace chip {
@@ -61,23 +65,24 @@ private:
 
     // Adjust the failsafe timer if CommissioningDelegate GetCASEFailsafeTimerSeconds is set
     void SetCASEFailsafeTimerIfNeeded();
-    void ReleaseDAC();
-    void ReleasePAI();
 
-    CHIP_ERROR SetDAC(const ByteSpan & dac);
-    CHIP_ERROR SetPAI(const ByteSpan & pai);
+    const ByteSpan GetDAC() { return mDAC.Span(); }
+    const ByteSpan GetPAI() { return mPAI.Span(); }
 
-    ByteSpan GetDAC() const { return ByteSpan(mDAC, mDACLen); }
-    ByteSpan GetPAI() const { return ByteSpan(mPAI, mPAILen); }
-
-    CHIP_ERROR NOCChainGenerated(ByteSpan noc, ByteSpan icac, ByteSpan rcac, IdentityProtectionKeySpan ipk, NodeId adminSubject);
+    CHIP_ERROR NOCChainGenerated(ByteSpan noc, ByteSpan icac, ByteSpan rcac, Crypto::IdentityProtectionKeySpan ipk,
+                                 NodeId adminSubject);
     EndpointId GetEndpoint(const CommissioningStage & stage) const;
     CommissioningStage GetNextCommissioningStageInternal(CommissioningStage currentStage, CHIP_ERROR & lastErr);
+
+    CHIP_ERROR VerifyICDRegistrationInfo(const CommissioningParameters & params);
 
     // Helper function to determine whether next stage should be kWiFiNetworkSetup,
     // kThreadNetworkSetup or kCleanup, depending whether network information has
     // been provided that matches the thread/wifi endpoint of the target.
     CommissioningStage GetNextCommissioningStageNetworkSetup(CommissioningStage currentStage, CHIP_ERROR & lastErr);
+
+    // Helper function to allocate memory for a scopedMemoryBuffer and populate it with the data from the input span
+    CHIP_ERROR AllocateMemoryAndCopySpan(Platform::ScopedMemoryBufferWithSize<uint8_t> & scopedBuffer, ByteSpan span);
 
     // Helper function to determine if a scan attempt should be made given the
     // scan attempt commissioning params and the corresponding network endpoint of
@@ -90,13 +95,31 @@ private:
                  mDeviceCommissioningInfo.network.thread.endpoint != kInvalidEndpointId));
     };
 
+    // Helper function to Determine whether secondary network interface is supported.
+    // Only true if information is provided for both networks, and the target has endpoint
+    // for wifi and thread.
+    bool IsSecondaryNetworkSupported() const
+    {
+        return ((mParams.GetSupportsConcurrentConnection().ValueOr(false) && mParams.GetWiFiCredentials().HasValue() &&
+                 mDeviceCommissioningInfo.network.wifi.endpoint != kInvalidEndpointId) &&
+                mParams.GetThreadOperationalDataset().HasValue() &&
+                mDeviceCommissioningInfo.network.thread.endpoint != kInvalidEndpointId);
+    }
+
+    void TrySecondaryNetwork() { mTryingSecondaryNetwork = true; }
+    bool TryingSecondaryNetwork() const { return mTryingSecondaryNetwork; }
+    void ResetTryingSecondaryNetwork() { mTryingSecondaryNetwork = false; }
+    bool mTryingSecondaryNetwork = false;
+
     bool mStopCommissioning = false;
 
     DeviceCommissioner * mCommissioner                               = nullptr;
     CommissioneeDeviceProxy * mCommissioneeDeviceProxy               = nullptr;
     OperationalCredentialsDelegate * mOperationalCredentialsDelegate = nullptr;
     OperationalDeviceProxy mOperationalDeviceProxy;
-    // Memory space for the commisisoning parameters that come in as ByteSpans - the caller is not guaranteed to retain this memory
+
+    // BEGIN memory space for commissioning parameters that are Spans or similar pointers:
+    // The caller is not guaranteed to retain the memory these parameters point to.
     uint8_t mSsid[CommissioningParameters::kMaxSsidLen];
     uint8_t mCredentials[CommissioningParameters::kMaxCredentialsLen];
     uint8_t mThreadOperationalDataset[CommissioningParameters::kMaxThreadDatasetLen];
@@ -113,15 +136,23 @@ private:
     static constexpr size_t kMaxSupportedDstStructs = 10;
     app::Clusters::TimeSynchronization::Structs::DSTOffsetStruct::Type mDstOffsetsBuf[kMaxSupportedDstStructs];
 
+    static constexpr size_t kMaxDefaultNtpSize = 128;
+    char mDefaultNtp[kMaxDefaultNtpSize];
+
+    uint8_t mICDSymmetricKey[Crypto::kAES_CCM128_Key_Length];
+    Platform::ScopedMemoryBufferWithSize<app::AttributePathParams> mExtraReadPaths;
+
+    // END memory space for commisisoning parameters
+
     bool mNeedsNetworkSetup = false;
     ReadCommissioningInfo mDeviceCommissioningInfo;
     bool mNeedsDST = false;
 
+    bool mNeedIcdRegistration = false;
     // TODO: Why were the nonces statically allocated, but the certs dynamically allocated?
-    uint8_t * mDAC   = nullptr;
-    uint16_t mDACLen = 0;
-    uint8_t * mPAI   = nullptr;
-    uint16_t mPAILen = 0;
+    Platform::ScopedMemoryBufferWithSize<uint8_t> mDAC;
+    Platform::ScopedMemoryBufferWithSize<uint8_t> mPAI;
+
     uint8_t mAttestationNonce[kAttestationNonceLength];
     uint8_t mCSRNonce[kCSRNonceLength];
     uint8_t mNOCertBuffer[Credentials::kMaxCHIPCertLength];
@@ -131,6 +162,12 @@ private:
     uint8_t mAttestationElements[Credentials::kMaxRspLen];
     uint16_t mAttestationSignatureLen = 0;
     uint8_t mAttestationSignature[Crypto::kMax_ECDSA_Signature_Length];
+
+#if CHIP_DEVICE_CONFIG_ENABLE_JOINT_FABRIC
+    Platform::ScopedMemoryBufferWithSize<uint8_t> mJFAdminRCAC;
+    Platform::ScopedMemoryBufferWithSize<uint8_t> mJFAdminICAC;
+    Platform::ScopedMemoryBufferWithSize<uint8_t> mJFAdminNOC;
+#endif
 };
 } // namespace Controller
 } // namespace chip

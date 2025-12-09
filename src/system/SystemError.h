@@ -39,6 +39,10 @@
 #include <lwip/err.h>
 #endif // CHIP_SYSTEM_CONFIG_USE_LWIP
 
+#if CHIP_SYSTEM_CONFIG_USE_NETXDUO
+#include <nx_api.h>
+#endif // CHIP_SYSTEM_CONFIG_USE_NETXDUO
+
 #ifdef __cplusplus
 
 #if CHIP_CONFIG_ERROR_SOURCE
@@ -71,6 +75,14 @@ extern void RegisterLwIPErrorFormatter(void);
 extern bool FormatLwIPError(char * buf, uint16_t bufSize, CHIP_ERROR err);
 
 #endif // CHIP_SYSTEM_CONFIG_USE_LWIP
+
+#if CHIP_SYSTEM_CONFIG_USE_NETXDUO
+
+extern CHIP_ERROR MapErrorNetXDuo(UINT code);
+extern void RegisterNetXDuoErrorFormatter(void);
+extern bool FormatNetXDuoError(char * buf, uint16_t bufSize, CHIP_ERROR err);
+
+#endif // CHIP_SYSTEM_CONFIG_USE_NETXDUO
 
 // clang-format off
 

@@ -23,6 +23,7 @@
 
 #pragma once
 
+#include <app/icd/server/ICDServerConfig.h>
 #include <lib/support/logging/CHIPLogging.h>
 #include <platform/ConnectivityManager.h>
 #include <platform/internal/DeviceNetworkInfo.h>
@@ -73,7 +74,6 @@ public:
     System::Clock::Timeout _GetWiFiAPIdleTimeout();
     void _SetWiFiAPIdleTimeout(System::Clock::Timeout val);
     CHIP_ERROR _GetAndLogWiFiStatsCounters();
-    bool _CanStartWiFiScan();
     void _OnWiFiScanDone();
     void _OnWiFiStationProvisionChange();
 // TODO ICD rework: ambiguous declaration of _SetPollingInterval when thread and wifi are both build together
@@ -169,12 +169,6 @@ template <class ImplClass>
 inline CHIP_ERROR GenericConnectivityManagerImpl_WiFi<ImplClass>::_GetAndLogWiFiStatsCounters()
 {
     return CHIP_ERROR_UNSUPPORTED_CHIP_FEATURE;
-}
-
-template <class ImplClass>
-inline bool GenericConnectivityManagerImpl_WiFi<ImplClass>::_CanStartWiFiScan()
-{
-    return false;
 }
 
 template <class ImplClass>

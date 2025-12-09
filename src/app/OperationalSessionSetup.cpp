@@ -38,11 +38,13 @@
 #include <lib/support/logging/CHIPLogging.h>
 #include <system/SystemClock.h>
 #include <system/SystemLayer.h>
+#include <tracing/metric_event.h>
 
 using namespace chip::Callback;
 using chip::AddressResolve::NodeLookupRequest;
 using chip::AddressResolve::Resolver;
 using chip::AddressResolve::ResolveResult;
+using namespace chip::Tracing;
 
 namespace chip {
 
@@ -76,8 +78,8 @@ bool OperationalSessionSetup::AttachToExistingSecureSession()
                             mState == State::WaitingForRetry,
                         false);
 
-    auto sessionHandle =
-        mInitParams.sessionManager->FindSecureSessionForNode(mPeerId, MakeOptional(Transport::SecureSession::Type::kCASE));
+    auto sessionHandle = mInitParams.sessionManager->FindSecureSessionForNode(
+        mPeerId, MakeOptional(Transport::SecureSession::Type::kCASE), mTransportPayloadCapability);
     if (!sessionHandle.HasValue())
         return false;
 
@@ -92,17 +94,20 @@ bool OperationalSessionSetup::AttachToExistingSecureSession()
 }
 
 void OperationalSessionSetup::Connect(Callback::Callback<OnDeviceConnected> * onConnection,
-                                      Callback::Callback<OnDeviceConnectionFailure> * onFailure)
+                                      Callback::Callback<OnDeviceConnectionFailure> * onFailure,
+                                      Callback::Callback<OnSetupFailure> * onSetupFailure,
+                                      TransportPayloadCapability transportPayloadCapability)
 {
     CHIP_ERROR err   = CHIP_NO_ERROR;
     bool isConnected = false;
 
+    mTransportPayloadCapability = transportPayloadCapability;
     //
     // Always enqueue our user provided callbacks into our callback list.
     // If anything goes wrong below, we'll trigger failures (including any queued from
     // a previous iteration which in theory shouldn't happen, but this is written to be more defensive)
     //
-    EnqueueConnectionCallbacks(onConnection, onFailure);
+    EnqueueConnectionCallbacks(onConnection, onFailure, onSetupFailure);
 
     switch (mState)
     {
@@ -178,8 +183,31 @@ void OperationalSessionSetup::Connect(Callback::Callback<OnDeviceConnected> * on
     }
 }
 
-void OperationalSessionSetup::UpdateDeviceData(const Transport::PeerAddress & addr, const ReliableMessageProtocolConfig & config)
+void OperationalSessionSetup::Connect(Callback::Callback<OnDeviceConnected> * onConnection,
+                                      Callback::Callback<OnDeviceConnectionFailure> * onFailure,
+                                      TransportPayloadCapability transportPayloadCapability)
 {
+    Connect(onConnection, onFailure, nullptr, transportPayloadCapability);
+}
+
+void OperationalSessionSetup::Connect(Callback::Callback<OnDeviceConnected> * onConnection,
+                                      Callback::Callback<OnSetupFailure> * onSetupFailure,
+                                      TransportPayloadCapability transportPayloadCapability)
+{
+    Connect(onConnection, nullptr, onSetupFailure, transportPayloadCapability);
+}
+
+void OperationalSessionSetup::UpdateDeviceData(const ResolveResult & result)
+{
+    auto & config = result.mrpRemoteConfig;
+    auto addr     = result.address;
+#if CHIP_DEVICE_CONFIG_ENABLE_AUTOMATIC_CASE_RETRIES
+    // Make sure to clear out our reason for trying the next result first thing,
+    // so it does not stick around in various error cases.
+    bool tryingNextResultDueToSessionEstablishmentError = mTryingNextResultDueToSessionEstablishmentError;
+    mTryingNextResultDueToSessionEstablishmentError     = false;
+#endif // CHIP_DEVICE_CONFIG_ENABLE_AUTOMATIC_CASE_RETRIES
+
     if (mState == State::Uninitialized)
     {
         return;
@@ -222,37 +250,81 @@ void OperationalSessionSetup::UpdateDeviceData(const Transport::PeerAddress & ad
         return;
     }
 
-    CHIP_ERROR err = EstablishConnection(config);
+    CHIP_ERROR err = EstablishConnection(result);
     LogErrorOnFailure(err);
     if (err == CHIP_NO_ERROR)
     {
         // We expect to get a callback via OnSessionEstablished or OnSessionEstablishmentError to continue
         // the state machine forward.
+#if CHIP_DEVICE_CONFIG_ENABLE_AUTOMATIC_CASE_RETRIES
+        if (tryingNextResultDueToSessionEstablishmentError)
+        {
+            // Our retry has already been kicked off, so claim 0 delay until it
+            // starts.  We only reach this from OnSessionEstablishmentError when
+            // the error is CHIP_ERROR_TIMEOUT.
+            NotifyRetryHandlers(CHIP_ERROR_TIMEOUT, config, System::Clock::kZero);
+        }
+#endif // CHIP_DEVICE_CONFIG_ENABLE_AUTOMATIC_CASE_RETRIES
         return;
     }
 
     // Move to the ResolvingAddress state, in case we have more results,
-    // since we expect to receive results in that state.
+    // since we expect to receive results in that state.  Pretend like we moved
+    // on directly to this address from whatever triggered us to try this result
+    // (so restore mTryingNextResultDueToSessionEstablishmentError to the value
+    // it had at the start of this function).
     MoveToState(State::ResolvingAddress);
+#if CHIP_DEVICE_CONFIG_ENABLE_AUTOMATIC_CASE_RETRIES
+    mTryingNextResultDueToSessionEstablishmentError = tryingNextResultDueToSessionEstablishmentError;
+#endif // CHIP_DEVICE_CONFIG_ENABLE_AUTOMATIC_CASE_RETRIES
     if (CHIP_NO_ERROR == Resolver::Instance().TryNextResult(mAddressLookupHandle))
     {
-        // No need to NotifyRetryHandlers, since we never actually
-        // spent any time trying the previous result.
+        // No need to NotifyRetryHandlers, since we never actually spent any
+        // time trying the previous result.  Whatever work we need to do has
+        // been handled by our recursive OnNodeAddressResolved callback.  Make
+        // sure not to touch `this` under here, because it might have been
+        // deleted by OnNodeAddressResolved.
         return;
     }
+
+    // No need to reset mTryingNextResultDueToSessionEstablishmentError here,
+    // because we're about to delete ourselves.
 
     DequeueConnectionCallbacks(err);
     // Do not touch `this` instance anymore; it has been destroyed in DequeueConnectionCallbacks.
 }
 
-CHIP_ERROR OperationalSessionSetup::EstablishConnection(const ReliableMessageProtocolConfig & config)
+CHIP_ERROR OperationalSessionSetup::EstablishConnection(const ResolveResult & result)
 {
-    mCASEClient = mClientPool->Allocate();
-    ReturnErrorCodeIf(mCASEClient == nullptr, CHIP_ERROR_NO_MEMORY);
+    auto & config = result.mrpRemoteConfig;
+#if INET_CONFIG_ENABLE_TCP_ENDPOINT
+    if (mTransportPayloadCapability == TransportPayloadCapability::kLargePayload)
+    {
+        if (result.supportsTcpServer)
+        {
+            // Set the transport type for carrying large payloads
+            mDeviceAddress.SetTransportType(chip::Transport::Type::kTcp);
+        }
+        else
+        {
+            // we should not set the large payload while the TCP support is not enabled
+            ChipLogError(
+                Discovery,
+                "LargePayload session requested but peer does not support TCP server, PeerNodeId=" ChipLogFormatScopedNodeId,
+                ChipLogValueScopedNodeId(mPeerId));
+            return CHIP_ERROR_INTERNAL;
+        }
+    }
+#endif
 
+    mCASEClient = mClientPool->Allocate();
+    VerifyOrReturnError(mCASEClient != nullptr, CHIP_ERROR_NO_MEMORY);
+
+    MATTER_LOG_METRIC_BEGIN(kMetricDeviceCASESession);
     CHIP_ERROR err = mCASEClient->EstablishSession(mInitParams, mPeerId, mDeviceAddress, config, this);
     if (err != CHIP_NO_ERROR)
     {
+        MATTER_LOG_METRIC_END(kMetricDeviceCASESession, err);
         CleanupCASEClient();
         return err;
     }
@@ -263,30 +335,17 @@ CHIP_ERROR OperationalSessionSetup::EstablishConnection(const ReliableMessagePro
 }
 
 void OperationalSessionSetup::EnqueueConnectionCallbacks(Callback::Callback<OnDeviceConnected> * onConnection,
-                                                         Callback::Callback<OnDeviceConnectionFailure> * onFailure)
+                                                         Callback::Callback<OnDeviceConnectionFailure> * onFailure,
+                                                         Callback::Callback<OnSetupFailure> * onSetupFailure)
 {
-    if (onConnection != nullptr)
-    {
-        mConnectionSuccess.Enqueue(onConnection->Cancel());
-    }
-
-    if (onFailure != nullptr)
-    {
-        mConnectionFailure.Enqueue(onFailure->Cancel());
-    }
+    mCallbacks.Enqueue(onConnection, onFailure, onSetupFailure);
 }
 
-void OperationalSessionSetup::DequeueConnectionCallbacks(CHIP_ERROR error, ReleaseBehavior releaseBehavior)
+void OperationalSessionSetup::DequeueConnectionCallbacks(CHIP_ERROR error, SessionEstablishmentStage stage,
+                                                         ReleaseBehavior releaseBehavior)
 {
-    Cancelable failureReady, successReady;
-
-    //
-    // Dequeue both failure and success callback lists into temporary stack args before invoking either of them.
-    // We do this since we may not have a valid 'this' pointer anymore upon invoking any of those callbacks
-    // since the callee may destroy this object as part of that callback.
-    //
-    mConnectionFailure.DequeueAll(failureReady);
-    mConnectionSuccess.DequeueAll(successReady);
+    // We expect that we only have callbacks if we are not performing just address update.
+    VerifyOrDie(!mPerformingAddressUpdate || mCallbacks.IsEmpty());
 
 #if CHIP_DEVICE_CONFIG_ENABLE_AUTOMATIC_CASE_RETRIES
     // Clear out mConnectionRetry, so that those cancelables are not holding
@@ -298,10 +357,17 @@ void OperationalSessionSetup::DequeueConnectionCallbacks(CHIP_ERROR error, Relea
 #endif // CHIP_DEVICE_CONFIG_ENABLE_AUTOMATIC_CASE_RETRIES
 
     // Gather up state we will need for our notifications.
-    bool performingAddressUpdate                  = mPerformingAddressUpdate;
+    SuccessFailureCallbackList readyCallbacks;
+    readyCallbacks.EnqueueTakeAll(mCallbacks);
     auto * exchangeMgr                            = mInitParams.exchangeMgr;
     Optional<SessionHandle> optionalSessionHandle = mSecureSession.Get();
     ScopedNodeId peerId                           = mPeerId;
+    System::Clock::Milliseconds16 requestedBusyDelay =
+#if CHIP_CONFIG_ENABLE_BUSY_HANDLING_FOR_OPERATIONAL_SESSION_SETUP
+        mRequestedBusyDelay;
+#else
+        System::Clock::kZero;
+#endif // CHIP_CONFIG_ENABLE_BUSY_HANDLING_FOR_OPERATIONAL_SESSION_SETUP
 
     if (releaseBehavior == ReleaseBehavior::Release)
     {
@@ -310,75 +376,95 @@ void OperationalSessionSetup::DequeueConnectionCallbacks(CHIP_ERROR error, Relea
     }
 
     // DO NOT touch any members of this object after this point.  It's dead.
-
-    NotifyConnectionCallbacks(failureReady, successReady, error, peerId, performingAddressUpdate, exchangeMgr,
-                              optionalSessionHandle);
+    NotifyConnectionCallbacks(readyCallbacks, error, stage, peerId, exchangeMgr, optionalSessionHandle, requestedBusyDelay);
 }
 
-void OperationalSessionSetup::NotifyConnectionCallbacks(Cancelable & failureReady, Cancelable & successReady, CHIP_ERROR error,
-                                                        const ScopedNodeId & peerId, bool performingAddressUpdate,
+void OperationalSessionSetup::NotifyConnectionCallbacks(SuccessFailureCallbackList & ready, CHIP_ERROR error,
+                                                        SessionEstablishmentStage stage, const ScopedNodeId & peerId,
                                                         Messaging::ExchangeManager * exchangeMgr,
-                                                        const Optional<SessionHandle> & optionalSessionHandle)
+                                                        const Optional<SessionHandle> & optionalSessionHandle,
+                                                        System::Clock::Milliseconds16 requestedBusyDelay)
 {
-    //
-    // If we encountered no error, go ahead and call all success callbacks. Otherwise,
-    // call the failure callbacks.
-    //
-    while (failureReady.mNext != &failureReady)
+    Callback::Callback<OnDeviceConnected> * onConnected;
+    Callback::Callback<OnDeviceConnectionFailure> * onConnectionFailure;
+    Callback::Callback<OnSetupFailure> * onSetupFailure;
+    while (ready.Take(onConnected, onConnectionFailure, onSetupFailure))
     {
-        // We expect that we only have callbacks if we are not performing just address update.
-        VerifyOrDie(!performingAddressUpdate);
-        Callback::Callback<OnDeviceConnectionFailure> * cb =
-            Callback::Callback<OnDeviceConnectionFailure>::FromCancelable(failureReady.mNext);
-
-        cb->Cancel();
-
-        if (error != CHIP_NO_ERROR)
-        {
-            cb->mCall(cb->mContext, peerId, error);
-        }
-    }
-
-    while (successReady.mNext != &successReady)
-    {
-        // We expect that we only have callbacks if we are not performing just address update.
-        VerifyOrDie(!performingAddressUpdate);
-        Callback::Callback<OnDeviceConnected> * cb = Callback::Callback<OnDeviceConnected>::FromCancelable(successReady.mNext);
-
-        cb->Cancel();
         if (error == CHIP_NO_ERROR)
         {
             VerifyOrDie(exchangeMgr);
-            // We know that we for sure have the SessionHandle in the successful case.
-            cb->mCall(cb->mContext, *exchangeMgr, optionalSessionHandle.Value());
+            VerifyOrDie(optionalSessionHandle.Value()->AsSecureSession()->IsActiveSession());
+            if (onConnected != nullptr)
+            {
+                onConnected->mCall(onConnected->mContext, *exchangeMgr, optionalSessionHandle.Value());
+
+                // That sucessful call might have made the session inactive.  If it did, then we should
+                // not call any more success callbacks, since we do not in fact have an active session
+                // for them, and if they try to put the session in a holder that will fail, and then
+                // trying to use the holder as if it has a session will crash.
+                if (!optionalSessionHandle.Value()->AsSecureSession()->IsActiveSession())
+                {
+                    ChipLogError(Discovery, "Success callback for connection to " ChipLogFormatScopedNodeId " tore down session",
+                                 ChipLogValueScopedNodeId(peerId));
+                    error = CHIP_ERROR_CONNECTION_ABORTED;
+                }
+            }
+        }
+        else // error
+        {
+            if (onConnectionFailure != nullptr)
+            {
+                onConnectionFailure->mCall(onConnectionFailure->mContext, peerId, error);
+            }
+            if (onSetupFailure != nullptr)
+            {
+                ConnectionFailureInfo failureInfo(peerId, error, stage);
+#if CHIP_CONFIG_ENABLE_BUSY_HANDLING_FOR_OPERATIONAL_SESSION_SETUP
+                if (error == CHIP_ERROR_BUSY)
+                {
+                    failureInfo.requestedBusyDelay.Emplace(requestedBusyDelay);
+                }
+#endif // CHIP_CONFIG_ENABLE_BUSY_HANDLING_FOR_OPERATIONAL_SESSION_SETUP
+                onSetupFailure->mCall(onSetupFailure->mContext, failureInfo);
+            }
         }
     }
 }
 
-void OperationalSessionSetup::OnSessionEstablishmentError(CHIP_ERROR error)
+void OperationalSessionSetup::OnSessionEstablishmentError(CHIP_ERROR error, SessionEstablishmentStage stage)
 {
     VerifyOrReturn(mState == State::Connecting,
                    ChipLogError(Discovery, "OnSessionEstablishmentError was called while we were not connecting"));
 
-    if (CHIP_ERROR_TIMEOUT == error)
+    // If this condition ever changes, we may need to store the error in a
+    // member instead of having a boolean
+    // mTryingNextResultDueToSessionEstablishmentError, so we can recover the
+    // error in UpdateDeviceData.
+    if (CHIP_ERROR_TIMEOUT == error || CHIP_ERROR_BUSY == error)
     {
 #if CHIP_DEVICE_CONFIG_ENABLE_AUTOMATIC_CASE_RETRIES
         // Make a copy of the ReliableMessageProtocolConfig, since our
         // mCaseClient is about to go away once we change state.
         ReliableMessageProtocolConfig remoteMprConfig = mCASEClient->GetRemoteMRPIntervals();
-#endif
+#endif // CHIP_DEVICE_CONFIG_ENABLE_AUTOMATIC_CASE_RETRIES
 
         // Move to the ResolvingAddress state, in case we have more results,
         // since we expect to receive results in that state.
         MoveToState(State::ResolvingAddress);
+#if CHIP_DEVICE_CONFIG_ENABLE_AUTOMATIC_CASE_RETRIES
+        mTryingNextResultDueToSessionEstablishmentError = true;
+#endif // CHIP_DEVICE_CONFIG_ENABLE_AUTOMATIC_CASE_RETRIES
         if (CHIP_NO_ERROR == Resolver::Instance().TryNextResult(mAddressLookupHandle))
         {
-#if CHIP_DEVICE_CONFIG_ENABLE_AUTOMATIC_CASE_RETRIES
-            // Our retry has already been kicked off.
-            NotifyRetryHandlers(error, remoteMprConfig, System::Clock::kZero);
-#endif // CHIP_DEVICE_CONFIG_ENABLE_AUTOMATIC_CASE_RETRIES
+            // Whatever work we needed to do has been handled by our
+            // OnNodeAddressResolved callback.  Make sure not to touch `this`
+            // under here, because it might have been deleted by
+            // OnNodeAddressResolved.
             return;
         }
+#if CHIP_DEVICE_CONFIG_ENABLE_AUTOMATIC_CASE_RETRIES
+        mTryingNextResultDueToSessionEstablishmentError = false;
+#endif // CHIP_DEVICE_CONFIG_ENABLE_AUTOMATIC_CASE_RETRIES
 
         // Moving back to the Connecting state would be a bit of a lie, since we
         // don't have an mCASEClient.  Just go back to NeedsAddress, since
@@ -400,14 +486,32 @@ void OperationalSessionSetup::OnSessionEstablishmentError(CHIP_ERROR error)
 #endif // CHIP_DEVICE_CONFIG_ENABLE_AUTOMATIC_CASE_RETRIES
     }
 
-    DequeueConnectionCallbacks(error);
+    // Session failed to be established. This is when discovery is also stopped
+    MATTER_LOG_METRIC_END(kMetricDeviceOperationalDiscovery, error);
+    MATTER_LOG_METRIC_END(kMetricDeviceCASESession, error);
+
+    DequeueConnectionCallbacks(error, stage);
     // Do not touch `this` instance anymore; it has been destroyed in DequeueConnectionCallbacks.
+}
+
+void OperationalSessionSetup::OnResponderBusy(System::Clock::Milliseconds16 requestedDelay)
+{
+#if CHIP_DEVICE_CONFIG_ENABLE_AUTOMATIC_CASE_RETRIES || CHIP_CONFIG_ENABLE_BUSY_HANDLING_FOR_OPERATIONAL_SESSION_SETUP
+    // Store the requested delay, so that we can use it for scheduling our
+    // retry or communicate it to our API consumer.
+    mRequestedBusyDelay = requestedDelay;
+#endif
 }
 
 void OperationalSessionSetup::OnSessionEstablished(const SessionHandle & session)
 {
     VerifyOrReturn(mState == State::Connecting,
                    ChipLogError(Discovery, "OnSessionEstablished was called while we were not connecting"));
+
+    // Session has been established. This is when discovery is also stopped
+    MATTER_LOG_METRIC_END(kMetricDeviceOperationalDiscovery, CHIP_NO_ERROR);
+
+    MATTER_LOG_METRIC_END(kMetricDeviceCASESession, CHIP_NO_ERROR);
 
     if (!mSecureSession.Grab(session))
     {
@@ -479,6 +583,7 @@ CHIP_ERROR OperationalSessionSetup::LookupPeerAddress()
     {
         --mResolveAttemptsAllowed;
     }
+    MATTER_LOG_METRIC(kMetricDeviceOperationalDiscoveryAttemptCount, mAttemptsDone);
 #endif // CHIP_DEVICE_CONFIG_ENABLE_AUTOMATIC_CASE_RETRIES
 
     // NOTE: This is public API that can be used to update our stored peer
@@ -492,6 +597,10 @@ CHIP_ERROR OperationalSessionSetup::LookupPeerAddress()
                         mPeerId.GetFabricIndex(), ChipLogValueX64(mPeerId.GetNodeId()));
         return CHIP_NO_ERROR;
     }
+
+    // This code can be reached multiple times, if we discover multiple addresses or do retries.
+    // The metric backend can handle this and always picks the earliest occurrence as the start of the event.
+    MATTER_LOG_METRIC_BEGIN(kMetricDeviceOperationalDiscovery);
 
     auto const * fabricInfo = mInitParams.fabricTable->FindFabricWithIndex(mPeerId.GetFabricIndex());
     VerifyOrReturnError(fabricInfo != nullptr, CHIP_ERROR_INVALID_FABRIC_INDEX);
@@ -531,7 +640,7 @@ void OperationalSessionSetup::PerformAddressUpdate()
 
 void OperationalSessionSetup::OnNodeAddressResolved(const PeerId & peerId, const ResolveResult & result)
 {
-    UpdateDeviceData(result.address, result.mrpRemoteConfig);
+    UpdateDeviceData(result);
 }
 
 void OperationalSessionSetup::OnNodeAddressResolutionFailed(const PeerId & peerId, CHIP_ERROR reason)
@@ -541,7 +650,7 @@ void OperationalSessionSetup::OnNodeAddressResolutionFailed(const PeerId & peerI
 
 #if CHIP_DEVICE_CONFIG_ENABLE_AUTOMATIC_CASE_RETRIES
     // If we're in a mode where we would generally retry CASE, retry operational
-    // discovery once.  That allows us to more-gracefully handle broken networks
+    // discovery if we're allowed to.  That allows us to more-gracefully handle broken networks
     // where multicast DNS does not actually work and hence only the initial
     // unicast DNS-SD queries get a response.
     //
@@ -564,6 +673,8 @@ void OperationalSessionSetup::OnNodeAddressResolutionFailed(const PeerId & peerI
             --mAttemptsDone;
         }
 
+        MATTER_LOG_METRIC(kMetricDeviceOperationalDiscoveryAttemptCount, mAttemptsDone);
+
         CHIP_ERROR err = LookupPeerAddress();
         if (err == CHIP_NO_ERROR)
         {
@@ -577,6 +688,8 @@ void OperationalSessionSetup::OnNodeAddressResolutionFailed(const PeerId & peerI
         }
     }
 #endif
+
+    MATTER_LOG_METRIC_END(kMetricDeviceOperationalDiscovery, reason);
 
     // No need to modify any variables in `this` since call below releases `this`.
     DequeueConnectionCallbacks(reason);
@@ -629,9 +742,22 @@ CHIP_ERROR OperationalSessionSetup::ScheduleSessionSetupReattempt(System::Clock:
     static_assert(UINT16_MAX / CHIP_DEVICE_CONFIG_AUTOMATIC_CASE_RETRY_INITIAL_DELAY_SECONDS >=
                       (1 << CHIP_DEVICE_CONFIG_AUTOMATIC_CASE_RETRY_MAX_BACKOFF),
                   "Our backoff calculation will overflow.");
-    timerDelay = System::Clock::Seconds16(
+    System::Clock::Timeout actualTimerDelay = System::Clock::Seconds16(
         static_cast<uint16_t>(CHIP_DEVICE_CONFIG_AUTOMATIC_CASE_RETRY_INITIAL_DELAY_SECONDS
-                              << min((mAttemptsDone - 1), CHIP_DEVICE_CONFIG_AUTOMATIC_CASE_RETRY_MAX_BACKOFF)));
+                              << std::min((mAttemptsDone - 1), CHIP_DEVICE_CONFIG_AUTOMATIC_CASE_RETRY_MAX_BACKOFF)));
+    const bool responseWasBusy = mRequestedBusyDelay != System::Clock::kZero;
+    if (responseWasBusy)
+    {
+        if (mRequestedBusyDelay > actualTimerDelay)
+        {
+            actualTimerDelay = mRequestedBusyDelay;
+        }
+
+        // Reset mRequestedBusyDelay now that we have consumed it, so it does
+        // not affect future reattempts not triggered by a busy response.
+        mRequestedBusyDelay = System::Clock::kZero;
+    }
+
     if (mAttemptsDone % 2 == 0)
     {
         // It's possible that the other side received one of our Sigma1 messages
@@ -640,11 +766,27 @@ CHIP_ERROR OperationalSessionSetup::ScheduleSessionSetupReattempt(System::Clock:
         // listening for Sigma1 messages again.
         //
         // To handle that, on every other retry, add the amount of time it would
-        // take the other side to time out.
+        // take the other side to time out.  It would be nice if we could rely
+        // on the delay reported in a BUSY response to just tell us that value,
+        // but in practice for old devices BUSY often sends some hardcoded value
+        // that tells us nothing about when the other side will decide it has
+        // timed out.
+        //
+        // Unfortunately, we do not have the MRP config for the other side here,
+        // but in practice if the other side is using its local config to
+        // compute Sigma2 response timeouts, then it's also returning useful
+        // values with BUSY, so we will wait long enough.
         auto additionalTimeout = CASESession::ComputeSigma2ResponseTimeout(GetLocalMRPConfig().ValueOr(GetDefaultMRPConfig()));
-        timerDelay += std::chrono::duration_cast<System::Clock::Seconds16>(additionalTimeout);
+        actualTimerDelay += additionalTimeout;
     }
-    CHIP_ERROR err = mInitParams.exchangeMgr->GetSessionManager()->SystemLayer()->StartTimer(timerDelay, TrySetupAgain, this);
+    timerDelay = std::chrono::duration_cast<System::Clock::Seconds16>(actualTimerDelay);
+
+    CHIP_ERROR err = mInitParams.exchangeMgr->GetSessionManager()->SystemLayer()->StartTimer(actualTimerDelay, TrySetupAgain, this);
+
+    // TODO: If responseWasBusy, should we increment, mRemainingAttempts and
+    // mResolveAttemptsAllowed, since we were explicitly told to retry?  Hard to
+    // tell what consumers expect out of a capped retry count here.
+
     // The cast on count() is needed because the type count() returns might not
     // actually be uint16_t; on some platforms it's int.
     ChipLogProgress(Discovery,
@@ -702,10 +844,43 @@ void OperationalSessionSetup::NotifyRetryHandlers(CHIP_ERROR error, const Reliab
 
 void OperationalSessionSetup::NotifyRetryHandlers(CHIP_ERROR error, System::Clock::Seconds16 timeoutEstimate)
 {
-    for (auto * item = mConnectionRetry.First(); item && item != &mConnectionRetry; item = item->mNext)
+    // We have to be very careful here: Calling into these handlers might in
+    // theory destroy the Callback objects involved, but unlike the
+    // succcess/failure cases we don't want to just clear the handlers from our
+    // list when we are calling them, because we might need to call a given
+    // handler more than once.
+    //
+    // To handle this we:
+    //
+    // 1) Snapshot the list of handlers up front, so if any of the handlers
+    //    triggers an AddRetryHandler with some other handler that does not
+    //    affect the list we plan to notify here.
+    //
+    // 2) When planning to notify a handler move it to a new list that contains
+    //    just that handler.  This way if it gets canceled as part of the
+    //    notification we can tell it has been canceled.
+    //
+    // 3) If notifying the handler does not cancel it, add it back to our list
+    //    of handlers so we will notify it on future retries.
+
+    Cancelable retryHandlerListSnapshot;
+    mConnectionRetry.DequeueAll(retryHandlerListSnapshot);
+
+    while (retryHandlerListSnapshot.mNext != &retryHandlerListSnapshot)
     {
-        auto cb = Callback::Callback<OnDeviceConnectionRetry>::FromCancelable(item);
+        auto * cb = Callback::Callback<OnDeviceConnectionRetry>::FromCancelable(retryHandlerListSnapshot.mNext);
+
+        Callback::CallbackDeque currentCallbackHolder;
+        currentCallbackHolder.Enqueue(cb->Cancel());
+
         cb->mCall(cb->mContext, mPeerId, error, timeoutEstimate);
+
+        if (currentCallbackHolder.mNext != &currentCallbackHolder)
+        {
+            // Callback has not been canceled as part of the call, so is still
+            // supposed to be registered with us.
+            AddRetryHandler(cb);
+        }
     }
 }
 #endif // CHIP_DEVICE_CONFIG_ENABLE_AUTOMATIC_CASE_RETRIES

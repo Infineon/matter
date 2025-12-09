@@ -1,6 +1,6 @@
 /*
  *
- *    Copyright (c) 2021 Project CHIP Authors
+ *    Copyright (c) 2021-2024 Project CHIP Authors
  *
  *    Licensed under the Apache License, Version 2.0 (the "License");
  *    you may not use this file except in compliance with the License.
@@ -99,11 +99,16 @@ public:
     static StorageKeyName FabricNOC(FabricIndex fabric) { return StorageKeyName::Formatted("f/%x/n", fabric); }
     static StorageKeyName FabricICAC(FabricIndex fabric) { return StorageKeyName::Formatted("f/%x/i", fabric); }
     static StorageKeyName FabricRCAC(FabricIndex fabric) { return StorageKeyName::Formatted("f/%x/r", fabric); }
+    static StorageKeyName FabricVVSC(FabricIndex fabric) { return StorageKeyName::Formatted("f/%x/vvsc", fabric); }
+    static StorageKeyName FabricVidVerificationStatement(FabricIndex fabric)
+    {
+        return StorageKeyName::Formatted("f/%x/vvs", fabric);
+    }
     static StorageKeyName FabricMetadata(FabricIndex fabric) { return StorageKeyName::Formatted("f/%x/m", fabric); }
     static StorageKeyName FabricOpKey(FabricIndex fabric) { return StorageKeyName::Formatted("f/%x/o", fabric); }
 
     // Fail-safe handling
-    static StorageKeyName FailSafeCommitMarkerKey() { return StorageKeyName::FromConst("g/fs/c"); }
+    static StorageKeyName FabricTableCommitMarkerKey() { return StorageKeyName::FromConst("g/fs/c"); }
     static StorageKeyName FailSafeNetworkConfig() { return StorageKeyName::FromConst("g/fs/n"); }
 
     // LastKnownGoodTime
@@ -133,6 +138,9 @@ public:
     // Group Message Counters
     static StorageKeyName GroupDataCounter() { return StorageKeyName::FromConst("g/gdc"); }
     static StorageKeyName GroupControlCounter() { return StorageKeyName::FromConst("g/gcc"); }
+
+    // ICD Check-In Counter
+    static StorageKeyName ICDCheckInCounter() { return StorageKeyName::FromConst("g/icd/cic"); }
 
     // Device Information Provider
     static StorageKeyName UserLabelLengthKey(EndpointId endpoint) { return StorageKeyName::Formatted("g/userlbl/%x", endpoint); }
@@ -190,6 +198,17 @@ public:
         return StorageKeyName::Formatted("f/%x/icd/%x", fabric, index);
     }
 
+    // Thread Network Directory
+
+    static StorageKeyName ThreadNetworkDirectoryIndex() { return StorageKeyName::FromConst("g/tnd/i"); }
+    static StorageKeyName ThreadNetworkDirectoryDataset(uint64_t extendedPanId)
+    {
+        return StorageKeyName::Formatted("g/tnd/n/%08" PRIx32 "%08" PRIx32, // some platforms can't format uint64
+                                         static_cast<uint32_t>(extendedPanId >> 32), static_cast<uint32_t>(extendedPanId));
+    }
+
+    // OTA
+
     static StorageKeyName OTADefaultProviders() { return StorageKeyName::FromConst("g/o/dp"); }
     static StorageKeyName OTACurrentProvider() { return StorageKeyName::FromConst("g/o/cp"); }
     static StorageKeyName OTAUpdateToken() { return StorageKeyName::FromConst("g/o/ut"); }
@@ -229,6 +248,23 @@ public:
     static StorageKeyName TSDefaultNTP() { return StorageKeyName::FromConst("g/ts/dntp"); }
     static StorageKeyName TSTimeZone() { return StorageKeyName::FromConst("g/ts/tz"); }
     static StorageKeyName TSDSTOffset() { return StorageKeyName::FromConst("g/ts/dsto"); }
+
+    // FabricICDClientInfoCounter is only used by DefaultICDClientStorage
+    // Records the number of ClientInfos for a particular fabric
+    static StorageKeyName FabricICDClientInfoCounter(FabricIndex fabric) { return StorageKeyName::Formatted("f/%x/icdc", fabric); }
+
+    // ICDClientInfoKey is only used by DefaultICDClientStorage
+    // Stores/Loads all ICD clientInfos for a particular fabric
+    static StorageKeyName ICDClientInfoKey(FabricIndex fabric) { return StorageKeyName::Formatted("f/%x/icdk", fabric); }
+
+    // ICDFabricList is only used by DefaultICDClientStorage
+    // when new fabric is created, this list needs to be updated,
+    // when client init DefaultICDClientStorage, this table needs to be loaded.
+    static StorageKeyName ICDFabricList() { return StorageKeyName::FromConst("g/icdfl"); }
+
+    // Terms and Conditions Acceptance Key
+    // Stores the terms and conditions acceptance including terms and conditions revision, TLV encoded
+    static StorageKeyName TermsAndConditionsAcceptance() { return StorageKeyName::FromConst("g/tc"); }
 };
 
 } // namespace chip

@@ -23,9 +23,7 @@
  *
  */
 
-#ifndef __STDC_LIMIT_MACROS
-#define __STDC_LIMIT_MACROS
-#endif
+#include <algorithm>
 #include <limits>
 #include <stdint.h>
 #include <stdio.h>
@@ -34,8 +32,12 @@
 #include <inet/IPAddress.h>
 #include <lib/support/CodeUtils.h>
 
-#if CHIP_SYSTEM_CONFIG_USE_POSIX_SOCKETS || CHIP_SYSTEM_CONFIG_USE_NETWORK_FRAMEWORK
+#if CHIP_SYSTEM_CONFIG_USE_POSIX_SOCKETS
 #include <arpa/inet.h>
+#endif
+
+#if CHIP_SYSTEM_CONFIG_USE_NETXDUO
+#include "inet_utils.h"
 #endif
 
 namespace chip {
@@ -43,7 +45,7 @@ namespace Inet {
 
 char * IPAddress::ToString(char * buf, uint32_t bufSize) const
 {
-#if CHIP_SYSTEM_CONFIG_USE_LWIP && !CHIP_SYSTEM_CONFIG_USE_OPEN_THREAD_ENDPOINT
+#if CHIP_SYSTEM_CONFIG_USE_LWIP && !CHIP_SYSTEM_CONFIG_USE_OPENTHREAD_ENDPOINT
 #if INET_CONFIG_ENABLE_IPV4
     if (IsIPv4())
     {
@@ -56,12 +58,12 @@ char * IPAddress::ToString(char * buf, uint32_t bufSize) const
         ip6_addr_t ip6_addr = ToIPv6();
         ip6addr_ntoa_r(&ip6_addr, buf, (int) bufSize);
     }
-#elif CHIP_SYSTEM_CONFIG_USE_SOCKETS
+#elif CHIP_SYSTEM_CONFIG_USE_SOCKETS || CHIP_SYSTEM_CONFIG_USE_NETWORK_FRAMEWORK
     // socklen_t is sometimes signed, sometimes not, so the only safe way to do
     // this is to promote everything to an unsigned type that's known to be big
     // enough for everything, then cast back to uint32_t after taking the min.
-    bufSize =
-        static_cast<uint32_t>(min(static_cast<uintmax_t>(std::numeric_limits<socklen_t>::max()), static_cast<uintmax_t>(bufSize)));
+    bufSize = static_cast<uint32_t>(
+        std::min(static_cast<uintmax_t>(std::numeric_limits<socklen_t>::max()), static_cast<uintmax_t>(bufSize)));
 #if INET_CONFIG_ENABLE_IPV4
     if (IsIPv4())
     {
@@ -78,9 +80,21 @@ char * IPAddress::ToString(char * buf, uint32_t bufSize) const
         // This cast is safe because |s| points into |buf| which is not const.
         buf = const_cast<char *>(s);
     }
-#elif CHIP_SYSTEM_CONFIG_USE_OPEN_THREAD_ENDPOINT
+#elif CHIP_SYSTEM_CONFIG_USE_OPENTHREAD_ENDPOINT
     otIp6Address addr = ToIPv6();
     otIp6AddressToString(&addr, buf, static_cast<uint16_t>(bufSize));
+#elif CHIP_SYSTEM_CONFIG_USE_NETXDUO
+#if INET_CONFIG_ENABLE_IPV4
+    if (IsIPv4())
+    {
+        ULONG ip4_addr = ToIPv4();
+        inet_ntop4((const unsigned char *)ip4_addr, buf, (size_t) bufSize);
+    }
+    else
+#endif // INET_CONFIG_ENABLE_IPV4
+    {
+        inet_ntop6((const unsigned char *)Addr, buf, (size_t) bufSize);
+    }
 #endif // !CHIP_SYSTEM_CONFIG_USE_LWIP
 
     return buf;
@@ -91,13 +105,17 @@ bool IPAddress::FromString(const char * str, IPAddress & output)
 #if INET_CONFIG_ENABLE_IPV4
     if (strchr(str, ':') == nullptr)
     {
-#if CHIP_SYSTEM_CONFIG_USE_LWIP && !CHIP_SYSTEM_CONFIG_USE_OPEN_THREAD_ENDPOINT
+#if CHIP_SYSTEM_CONFIG_USE_LWIP && !CHIP_SYSTEM_CONFIG_USE_OPENTHREAD_ENDPOINT
         ip4_addr_t ipv4Addr;
         if (!ip4addr_aton(str, &ipv4Addr))
             return false;
-#elif CHIP_SYSTEM_CONFIG_USE_SOCKETS
+#elif CHIP_SYSTEM_CONFIG_USE_SOCKETS || CHIP_SYSTEM_CONFIG_USE_NETWORK_FRAMEWORK
         struct in_addr ipv4Addr;
         if (inet_pton(AF_INET, str, &ipv4Addr) < 1)
+            return false;
+#elif CHIP_SYSTEM_CONFIG_USE_NETXDUO
+        ULONG ipv4Addr;
+        if (!inet_pton4(str, (unsigned char *)&ipv4Addr))
             return false;
 #endif // !CHIP_SYSTEM_CONFIG_USE_LWIP
         output = IPAddress(ipv4Addr);
@@ -105,17 +123,21 @@ bool IPAddress::FromString(const char * str, IPAddress & output)
     else
 #endif // INET_CONFIG_ENABLE_IPV4
     {
-#if CHIP_SYSTEM_CONFIG_USE_LWIP && !CHIP_SYSTEM_CONFIG_USE_OPEN_THREAD_ENDPOINT
+#if CHIP_SYSTEM_CONFIG_USE_LWIP && !CHIP_SYSTEM_CONFIG_USE_OPENTHREAD_ENDPOINT
         ip6_addr_t ipv6Addr;
         if (!ip6addr_aton(str, &ipv6Addr))
             return false;
-#elif CHIP_SYSTEM_CONFIG_USE_SOCKETS
+#elif CHIP_SYSTEM_CONFIG_USE_SOCKETS || CHIP_SYSTEM_CONFIG_USE_NETWORK_FRAMEWORK
         struct in6_addr ipv6Addr;
         if (inet_pton(AF_INET6, str, &ipv6Addr) < 1)
             return false;
-#elif CHIP_SYSTEM_CONFIG_USE_OPEN_THREAD_ENDPOINT
+#elif CHIP_SYSTEM_CONFIG_USE_OPENTHREAD_ENDPOINT
         otIp6Address ipv6Addr;
         if (OT_ERROR_NONE != otIp6AddressFromString(str, &ipv6Addr))
+            return false;
+#elif CHIP_SYSTEM_CONFIG_USE_NETXDUO
+        ULONG ipv6Addr[4];
+        if (!inet_pton6(str, (unsigned char *)ipv6Addr))
             return false;
 #endif
         output = IPAddress(ipv6Addr);

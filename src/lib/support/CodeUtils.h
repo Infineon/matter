@@ -29,6 +29,7 @@
 #include <lib/core/CHIPConfig.h>
 #include <lib/core/CHIPError.h>
 #include <lib/core/ErrorStr.h>
+#include <lib/support/ObjectDump.h>
 #include <lib/support/VerificationMacrosNoLogging.h>
 #include <lib/support/logging/TextOnlyLogging.h>
 
@@ -130,30 +131,6 @@
 
 #include <nlassert.h>
 
-namespace chip {
-
-// Generic min() and max() functions
-//
-template <typename _T>
-constexpr inline const _T & min(const _T & a, const _T & b)
-{
-    if (b < a)
-        return b;
-
-    return a;
-}
-
-template <typename _T>
-constexpr inline const _T & max(const _T & a, const _T & b)
-{
-    if (a < b)
-        return b;
-
-    return a;
-}
-
-} // namespace chip
-
 /**
  *  @def ReturnErrorOnFailure(expr)
  *
@@ -176,6 +153,33 @@ constexpr inline const _T & max(const _T & a, const _T & b)
         if (!::chip::ChipError::IsSuccess(__err))                                                                                  \
         {                                                                                                                          \
             return __err;                                                                                                          \
+        }                                                                                                                          \
+    } while (false)
+
+/**
+ *  @def ReturnErrorVariantOnFailure(expr)
+ *
+ *  @brief
+ *    This is for use when the calling function returns a Variant type. It returns a CHIP_ERROR variant with the corresponding error
+ *    code if the expression returns an error.
+ *
+ *  Example usage:
+ *
+ *  @code
+ *    ReturnErrorVariantOnFailure(NextStep, ParseSigma1(tlvReader, parsedSigma1));
+ *  @endcode
+ *
+ *  @param[in]  variantType   The Variant type that the calling function returns.
+ *  @param[in]  expr          An expression to be tested.
+
+ */
+#define ReturnErrorVariantOnFailure(variantType, expr)                                                                             \
+    do                                                                                                                             \
+    {                                                                                                                              \
+        auto __err = (expr);                                                                                                       \
+        if (!::chip::ChipError::IsSuccess(__err))                                                                                  \
+        {                                                                                                                          \
+            return variantType::Create<CHIP_ERROR>(__err);                                                                         \
         }                                                                                                                          \
     } while (false)
 
@@ -337,35 +341,10 @@ constexpr inline const _T & max(const _T & a, const _T & b)
 #endif // CHIP_CONFIG_ERROR_SOURCE
 
 /**
- *  @def ReturnErrorCodeIf(expr, code)
+ *  @def SuccessOrExit(error)
  *
  *  @brief
- *    Returns a specified error code if expression evaluates to true
- *
- *  Example usage:
- *
- *  @code
- *    ReturnErrorCodeIf(state == kInitialized, CHIP_NO_ERROR);
- *    ReturnErrorCodeIf(state == kInitialized, CHIP_ERROR_INCORRECT_STATE);
- *  @endcode
- *
- *  @param[in]  expr        A Boolean expression to be evaluated.
- *  @param[in]  code        A value to return if @a expr is false.
- */
-#define ReturnErrorCodeIf(expr, code)                                                                                              \
-    do                                                                                                                             \
-    {                                                                                                                              \
-        if (expr)                                                                                                                  \
-        {                                                                                                                          \
-            return code;                                                                                                           \
-        }                                                                                                                          \
-    } while (false)
-
-/**
- *  @def SuccessOrExit(aStatus)
- *
- *  @brief
- *    This checks for the specified status, which is expected to
+ *    This checks for the specified error, which is expected to
  *    commonly be successful (CHIP_NO_ERROR), and branches to
  *    the local label 'exit' if the status is unsuccessful.
  *
@@ -387,10 +366,23 @@ constexpr inline const _T & max(const _T & a, const _T & b)
  *  }
  *  @endcode
  *
- *  @param[in]  aStatus     A scalar status to be evaluated against zero (0).
+ *  @param[in]  error  A ChipError object to be evaluated against success (CHIP_NO_ERROR).
  *
  */
-#define SuccessOrExit(aStatus) nlEXPECT(::chip::ChipError::IsSuccess((aStatus)), exit)
+#define SuccessOrExit(error) nlEXPECT(::chip::ChipError::IsSuccess((error)), exit)
+
+/**
+ *  @def SuccessOrExitAction(error, anAction)
+ *
+ *  @brief
+ *    This checks for the specified error, which is expected to
+ *    commonly be successful (CHIP_NO_ERROR), and both executes
+ *    @a anAction and branches to the local label 'exit' if the
+ *    status is unsuccessful.
+ *
+ *  @param[in]  error  A ChipError object to be evaluated against success (CHIP_NO_ERROR).
+ */
+#define SuccessOrExitAction(error, action) nlEXPECT_ACTION(::chip::ChipError::IsSuccess((error)), exit, action)
 
 /**
  *  @def VerifyOrExit(aCondition, anAction)
@@ -527,11 +519,29 @@ inline void chipDie(void)
  *  @sa #chipDie
  *
  */
-#if CHIP_CONFIG_VERBOSE_VERIFY_OR_DIE
+#if CHIP_CONFIG_VERBOSE_VERIFY_OR_DIE && CHIP_CONFIG_VERBOSE_VERIFY_OR_DIE_NO_COND
 #define VerifyOrDie(aCondition)                                                                                                    \
-    nlABORT_ACTION(aCondition, ChipLogDetail(Support, "VerifyOrDie failure at %s:%d: %s", __FILE__, __LINE__, #aCondition))
+    nlABORT_ACTION(aCondition, ChipLogError(Support, "VerifyOrDie failure at %s:%d", __FILE__, __LINE__))
+#elif CHIP_CONFIG_VERBOSE_VERIFY_OR_DIE
+#define VerifyOrDie(aCondition)                                                                                                    \
+    nlABORT_ACTION(aCondition, ChipLogError(Support, "VerifyOrDie failure at %s:%d: %s", __FILE__, __LINE__, #aCondition))
 #else // CHIP_CONFIG_VERBOSE_VERIFY_OR_DIE
 #define VerifyOrDie(aCondition) VerifyOrDieWithoutLogging(aCondition)
+#endif // CHIP_CONFIG_VERBOSE_VERIFY_OR_DIE
+
+/**
+ * @def VerifyOrDieWithObject(aCondition, aObject)
+ *
+ * Like VerifyOrDie(), but calls DumpObjectToLog()
+ * on the provided object on failure before aborting
+ * if CHIP_CONFIG_VERBOSE_VERIFY_OR_DIE is enabled.
+ */
+#if CHIP_CONFIG_VERBOSE_VERIFY_OR_DIE
+#define VerifyOrDieWithObject(aCondition, aObject)                                                                                 \
+    nlABORT_ACTION(aCondition, ::chip::DumpObjectToLog(aObject);                                                                   \
+                   ChipLogError(Support, "VerifyOrDie failure at %s:%d: %s", __FILE__, __LINE__, #aCondition))
+#else // CHIP_CONFIG_VERBOSE_VERIFY_OR_DIE
+#define VerifyOrDieWithObject(aCondition, aObject) VerifyOrDieWithoutLogging(aCondition)
 #endif // CHIP_CONFIG_VERBOSE_VERIFY_OR_DIE
 
 /**
@@ -569,7 +579,7 @@ inline void chipDie(void)
  *
  */
 #define VerifyOrDieWithMsg(aCondition, aModule, aMessage, ...)                                                                     \
-    nlABORT_ACTION(aCondition, ChipLogDetail(aModule, aMessage, ##__VA_ARGS__))
+    nlABORT_ACTION(aCondition, ChipLogError(aModule, aMessage, ##__VA_ARGS__))
 
 /**
  *  @def LogErrorOnFailure(expr)
@@ -668,7 +678,7 @@ inline void chipDie(void)
 #endif
 
 /**
- * @def ArraySize(aArray)
+ * @def MATTER_ARRAY_SIZE(aArray)
  *
  * @brief
  *   Returns the size of an array in number of elements.
@@ -677,16 +687,18 @@ inline void chipDie(void)
  *
  * @code
  * int numbers[10];
- * SortNumbers(numbers, ArraySize(numbers));
+ * SortNumbers(numbers, MATTER_ARRAY_SIZE(numbers));
  * @endcode
  *
  * @return      The size of an array in number of elements.
  *
- * @note Clever template-based solutions seem to fail when ArraySize is used
+ * @note Clever template-based solutions seem to fail when MATTER_ARRAY_SIZE is used
  *       with a variable-length array argument, so we just do the C-compatible
  *       thing in C++ as well.
  */
-#define ArraySize(a) (sizeof(a) / sizeof((a)[0]))
+#ifndef MATTER_ARRAY_SIZE
+#define MATTER_ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
+#endif
 
 /**
  * @brief Ensures that if `str` is NULL, a non-null `default_str_value` is provided

@@ -24,10 +24,9 @@
 #pragma once
 #include <memory>
 
-#include <app/AttributeAccessInterface.h>
+#include <app/icd/server/ICDServerConfig.h>
 #include <inet/UDPEndPoint.h>
 #include <lib/support/CodeUtils.h>
-#include <platform/CHIPDeviceBuildConfig.h>
 #include <platform/CHIPDeviceConfig.h>
 #include <platform/CHIPDeviceEvent.h>
 
@@ -35,6 +34,9 @@
 
 #if INET_CONFIG_ENABLE_TCP_ENDPOINT
 #include <inet/TCPEndPoint.h>
+#endif
+#if CHIP_DEVICE_CONFIG_ENABLE_WIFIPAF
+#include <wifipaf/WiFiPAFLayer.h>
 #endif
 
 namespace chip {
@@ -49,6 +51,8 @@ namespace DeviceLayer {
 namespace Internal {
 template <class>
 class GenericPlatformManagerImpl;
+template <class>
+class GenericPlatformManagerImpl_CMSISOS;
 template <class>
 class GenericPlatformManagerImpl_FreeRTOS;
 template <class>
@@ -102,14 +106,6 @@ public:
         kWiFiAPMode_OnDemand_NoStationProvision = 5,
     };
 
-    enum ThreadMode
-    {
-        kThreadMode_NotSupported          = 0,
-        kThreadMode_ApplicationControlled = 1,
-        kThreadMode_Disabled              = 2,
-        kThreadMode_Enabled               = 3,
-    };
-
     enum WiFiStationState
     {
         kWiFiStationState_NotConnected,
@@ -126,6 +122,13 @@ public:
         kWiFiAPState_Activating,
         kWiFiAPState_Active,
         kWiFiAPState_Deactivating,
+    };
+
+    enum CHIPoNFCServiceMode
+    {
+        kCHIPoNFCServiceMode_NotSupported = 0,
+        kCHIPoNFCServiceMode_Enabled      = 1,
+        kCHIPoNFCServiceMode_Disabled     = 2,
     };
 
     enum CHIPoBLEServiceMode
@@ -147,8 +150,9 @@ public:
 
     enum BLEAdvertisingMode
     {
-        kFastAdvertising = 0,
-        kSlowAdvertising = 1,
+        kFastAdvertising     = 0,
+        kSlowAdvertising     = 1,
+        kExtendedAdvertising = 2,
     };
 
     enum class SEDIntervalMode
@@ -179,6 +183,22 @@ public:
     bool IsWiFiStationProvisioned();
     void ClearWiFiStationProvision();
     CHIP_ERROR GetAndLogWiFiStatsCounters();
+#if CHIP_DEVICE_CONFIG_ENABLE_WIFIPAF
+    struct WiFiPAFAdvertiseParam;
+    CHIP_ERROR WiFiPAFPublish(WiFiPAFAdvertiseParam & args);
+    CHIP_ERROR WiFiPAFCancelPublish(uint32_t PublishId);
+    typedef void (*OnConnectionCompleteFunct)(void * appState);
+    typedef void (*OnConnectionErrorFunct)(void * appState, CHIP_ERROR err);
+    CHIP_ERROR WiFiPAFSubscribe(const uint16_t & connDiscriminator, void * appState, OnConnectionCompleteFunct onSuccess,
+                                OnConnectionErrorFunct onError);
+    CHIP_ERROR WiFiPAFCancelSubscribe(uint32_t SubscribeId);
+    CHIP_ERROR WiFiPAFCancelIncompleteSubscribe();
+    CHIP_ERROR WiFiPAFSend(const WiFiPAF::WiFiPAFSession & TxInfo, System::PacketBufferHandle && msgBuf);
+    WiFiPAF::WiFiPAFLayer * GetWiFiPAF();
+    void WiFiPafSetApFreq(const uint16_t freq);
+    CHIP_ERROR WiFiPAFShutdown(uint32_t id, WiFiPAF::WiFiPafRole role);
+    bool WiFiPAFResourceAvailable();
+#endif
 
     // WiFi AP methods
     WiFiAPMode GetWiFiAPMode();
@@ -190,19 +210,16 @@ public:
     void MaintainOnDemandWiFiAP();
     System::Clock::Timeout GetWiFiAPIdleTimeout();
     void SetWiFiAPIdleTimeout(System::Clock::Timeout val);
+    CHIP_ERROR DisconnectNetwork();
 
     // Thread Methods
-    ThreadMode GetThreadMode();
-    CHIP_ERROR SetThreadMode(ThreadMode val);
     bool IsThreadEnabled();
-    bool IsThreadApplicationControlled();
     ThreadDeviceType GetThreadDeviceType();
     CHIP_ERROR SetThreadDeviceType(ThreadDeviceType deviceType);
     bool IsThreadAttached();
     bool IsThreadProvisioned();
     void ErasePersistentInfo();
     void ResetThreadNetworkDiagnosticsCounts();
-    CHIP_ERROR WriteThreadNetworkDiagnosticAttributeToTlv(AttributeId attributeId, app::AttributeValueEncoder & encoder);
 
     CHIP_ERROR SetPollingInterval(System::Clock::Milliseconds32 pollingInterval);
 
@@ -244,13 +261,14 @@ private:
     template <class>
     friend class Internal::GenericPlatformManagerImpl;
     template <class>
+    friend class Internal::GenericPlatformManagerImpl_CMSISOS;
+    template <class>
     friend class Internal::GenericPlatformManagerImpl_FreeRTOS;
     template <class>
     friend class Internal::GenericPlatformManagerImpl_POSIX;
 
     CHIP_ERROR Init();
     void OnPlatformEvent(const ChipDeviceEvent * event);
-    bool CanStartWiFiScan();
     void OnWiFiScanDone();
     void OnWiFiStationProvisionChange();
 
@@ -278,6 +296,19 @@ struct ConnectivityManager::SEDIntervalsConfig
      * Only meaningful when the device is acting as a sleepy end node. */
     System::Clock::Milliseconds32 IdleIntervalMS;
 };
+
+#if CHIP_DEVICE_CONFIG_ENABLE_WIFIPAF
+struct ConnectivityManager::WiFiPAFAdvertiseParam
+{
+    /* To enable/disable WiFiPAF Commissioning */
+    bool enable;
+
+    /* Frequency list */
+    uint16_t freq_list_len;
+    std::unique_ptr<uint16_t[]> freq_list;
+    uint32_t publish_id;
+};
+#endif
 
 /**
  * Returns a reference to the public interface of the ConnectivityManager singleton object.
@@ -418,24 +449,53 @@ inline CHIP_ERROR ConnectivityManager::GetAndLogWiFiStatsCounters()
     return static_cast<ImplClass *>(this)->_GetAndLogWiFiStatsCounters();
 }
 
-inline ConnectivityManager::ThreadMode ConnectivityManager::GetThreadMode()
+#if CHIP_DEVICE_CONFIG_ENABLE_WIFIPAF
+inline CHIP_ERROR ConnectivityManager::WiFiPAFPublish(WiFiPAFAdvertiseParam & args)
 {
-    return static_cast<ImplClass *>(this)->_GetThreadMode();
+    return static_cast<ImplClass *>(this)->_WiFiPAFPublish(args);
 }
 
-inline CHIP_ERROR ConnectivityManager::SetThreadMode(ThreadMode val)
+inline CHIP_ERROR ConnectivityManager::WiFiPAFCancelPublish(uint32_t PublishId)
 {
-    return static_cast<ImplClass *>(this)->_SetThreadMode(val);
+    return static_cast<ImplClass *>(this)->_WiFiPAFCancelPublish(PublishId);
 }
+
+inline CHIP_ERROR ConnectivityManager::WiFiPAFSubscribe(const uint16_t & connDiscriminator, void * appState,
+                                                        OnConnectionCompleteFunct onSuccess, OnConnectionErrorFunct onError)
+{
+    return static_cast<ImplClass *>(this)->_WiFiPAFSubscribe(connDiscriminator, appState, onSuccess, onError);
+}
+
+inline CHIP_ERROR ConnectivityManager::WiFiPAFCancelSubscribe(uint32_t SubscribeId)
+{
+    return static_cast<ImplClass *>(this)->_WiFiPAFCancelSubscribe(SubscribeId);
+}
+
+inline CHIP_ERROR ConnectivityManager::WiFiPAFCancelIncompleteSubscribe()
+{
+    return static_cast<ImplClass *>(this)->_WiFiPAFCancelIncompleteSubscribe();
+}
+
+inline CHIP_ERROR ConnectivityManager::WiFiPAFSend(const WiFiPAF::WiFiPAFSession & TxInfo,
+                                                   chip::System::PacketBufferHandle && msgBuf)
+{
+    return static_cast<ImplClass *>(this)->_WiFiPAFSend(TxInfo, std::move(msgBuf));
+}
+
+inline CHIP_ERROR ConnectivityManager::WiFiPAFShutdown(uint32_t id, WiFiPAF::WiFiPafRole role)
+{
+    return static_cast<ImplClass *>(this)->_WiFiPAFShutdown(id, role);
+}
+
+inline bool ConnectivityManager::WiFiPAFResourceAvailable()
+{
+    return static_cast<ImplClass *>(this)->_WiFiPAFResourceAvailable();
+}
+#endif
 
 inline bool ConnectivityManager::IsThreadEnabled()
 {
     return static_cast<ImplClass *>(this)->_IsThreadEnabled();
-}
-
-inline bool ConnectivityManager::IsThreadApplicationControlled()
-{
-    return static_cast<ImplClass *>(this)->_IsThreadApplicationControlled();
 }
 
 inline ConnectivityManager::ThreadDeviceType ConnectivityManager::GetThreadDeviceType()
@@ -477,24 +537,17 @@ inline void ConnectivityManager::ResetThreadNetworkDiagnosticsCounts()
     static_cast<ImplClass *>(this)->_ResetThreadNetworkDiagnosticsCounts();
 }
 
-/*
- * @brief Get runtime value from the thread network based on the given attribute ID.
- *        The info is encoded via the AttributeValueEncoder.
- *
- * @param attributeId Id of the attribute for the requested info.
- * @param aEncoder Encoder to encode the attribute value.
- *
- * @return CHIP_NO_ERROR = Succes.
- *         CHIP_ERROR_NOT_IMPLEMENTED = Runtime value for this attribute to yet available to send as reply
- *                                      Use standard read.
- *         CHIP_ERROR_UNSUPPORTED_CHIP_FEATURE = Is not a Runtime readable attribute. Use standard read
- *         All other errors should be treated as a read error and reported as such.
- */
-inline CHIP_ERROR ConnectivityManager::WriteThreadNetworkDiagnosticAttributeToTlv(AttributeId attributeId,
-                                                                                  app::AttributeValueEncoder & encoder)
+#if CHIP_DEVICE_CONFIG_ENABLE_WIFIPAF
+inline WiFiPAF::WiFiPAFLayer * ConnectivityManager::GetWiFiPAF()
 {
-    return static_cast<ImplClass *>(this)->_WriteThreadNetworkDiagnosticAttributeToTlv(attributeId, encoder);
+    return &WiFiPAF::WiFiPAFLayer::GetWiFiPAFLayer();
 }
+
+inline void ConnectivityManager::WiFiPafSetApFreq(const uint16_t freq)
+{
+    static_cast<ImplClass *>(this)->_WiFiPafSetApFreq(freq);
+}
+#endif
 
 inline Ble::BleLayer * ConnectivityManager::GetBleLayer()
 {
@@ -591,11 +644,6 @@ inline void ConnectivityManager::OnPlatformEvent(const ChipDeviceEvent * event)
     static_cast<ImplClass *>(this)->_OnPlatformEvent(event);
 }
 
-inline bool ConnectivityManager::CanStartWiFiScan()
-{
-    return static_cast<ImplClass *>(this)->_CanStartWiFiScan();
-}
-
 inline void ConnectivityManager::OnWiFiScanDone()
 {
     static_cast<ImplClass *>(this)->_OnWiFiScanDone();
@@ -604,6 +652,11 @@ inline void ConnectivityManager::OnWiFiScanDone()
 inline void ConnectivityManager::OnWiFiStationProvisionChange()
 {
     static_cast<ImplClass *>(this)->_OnWiFiStationProvisionChange();
+}
+
+inline CHIP_ERROR ConnectivityManager::DisconnectNetwork()
+{
+    return static_cast<ImplClass *>(this)->_DisconnectNetwork();
 }
 
 } // namespace DeviceLayer

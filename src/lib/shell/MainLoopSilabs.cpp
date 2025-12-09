@@ -15,7 +15,7 @@
  *    limitations under the License.
  */
 
-#include "matter_shell.h"
+#include "MatterShell.h"
 #include "streamer.h"
 #include <lib/shell/Engine.h>
 #include <lib/support/CHIPMem.h>
@@ -32,7 +32,7 @@ using chip::Shell::streamer_get;
 
 namespace {
 
-constexpr const char kShellPrompt[] = "matterCli> ";
+constexpr char kShellPrompt[] = "matterCli> ";
 
 // To track carriage returns of Windows return cases of '\r\n'
 bool haveCR = false;
@@ -53,24 +53,12 @@ void ReadLine(char * buffer, size_t max)
             break;
         }
 
-#ifdef BRD4325A
-        // for 917 SoC board, we need to create a rx event before we wait for the shell activity
-        // NotifyShellProcessFromISR() is called once the buffer is filled
-        while (streamer_read(streamer_get(), buffer + read, 1) == 1)
-        {
-            // Count how many characters were read; usually one but could be copy/paste
-            read++;
-        }
-#endif
         chip::WaitForShellActivity();
-#ifndef BRD4325A
-        // for EFR32 boards
         while (streamer_read(streamer_get(), buffer + read, 1) == 1)
         {
             // Count how many characters were read; usually one but could be copy/paste
             read++;
         }
-#endif
         // Process all characters that were read until we run out or exceed max char limit
         while (line_sz < read && line_sz < max)
         {
@@ -118,8 +106,8 @@ void ReadLine(char * buffer, size_t max)
                 if (isprint(static_cast<int>(buffer[line_sz])) || buffer[line_sz] == '\t')
                 {
                     streamer_printf(streamer_get(), "%c", buffer[line_sz]);
-                    line_sz++;
                 }
+                line_sz++;
                 break;
             }
         }
@@ -218,10 +206,6 @@ void ProcessShellLine(intptr_t args)
         }
     }
     MemoryFree(line);
-#ifdef BRD4325A
-    // small delay for uart print
-    vTaskDelay(1);
-#endif
     streamer_printf(streamer_get(), kShellPrompt);
 }
 
@@ -234,7 +218,7 @@ void Engine::RunMainLoop()
 {
     streamer_printf(streamer_get(), kShellPrompt);
 
-    while (true)
+    while (mRunning)
     {
         char * line = static_cast<char *>(Platform::MemoryAlloc(CHIP_SHELL_MAX_LINE_SIZE));
         ReadLine(line, CHIP_SHELL_MAX_LINE_SIZE);

@@ -21,7 +21,6 @@
 #include <app-common/zap-generated/cluster-objects.h>
 
 #include <app/CommandResponseHelper.h>
-#include <app/util/af.h>
 
 namespace chip {
 namespace app {
@@ -34,7 +33,7 @@ namespace KeypadInput {
 class Delegate
 {
 public:
-    virtual void HandleSendKey(CommandResponseHelper<Commands::SendKeyResponse::Type> & helper, const CecKeyCode & keyCode) = 0;
+    virtual void HandleSendKey(CommandResponseHelper<Commands::SendKeyResponse::Type> & helper, const CECKeyCodeEnum & keyCode) = 0;
 
     bool HasFeature(chip::EndpointId endpoint, Feature feature);
 

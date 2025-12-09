@@ -23,6 +23,9 @@
  *
  */
 
+#include <memory>
+#include <utility>
+
 #include "chip-cert.h"
 
 #include <credentials/CertificationDeclaration.h>
@@ -135,8 +138,8 @@ CDFormat DetectCDFormat(const uint8_t * cd, uint32_t cdLen)
 {
     static const uint8_t cdRawPrefix1[] = { 0x30, 0x81 };
     static const uint8_t cdRawPrefix2[] = { 0x30, 0x82 };
-    static const char * cdHexPrefix     = "308";
-    static const char * cdB64Prefix     = "MI";
+    static const char cdHexPrefix[]     = "308";
+    static const char cdB64Prefix[]     = "MI";
 
     VerifyOrReturnError(cd != nullptr, kCDFormat_Unknown);
 
@@ -170,7 +173,7 @@ bool ReadCD(const char * fileNameOrStr, MutableByteSpan cd)
     {
         VerifyOrReturnError(ReadFileIntoMem(fileNameOrStr, nullptr, cdLen), false);
 
-        cdBuf = std::unique_ptr<uint8_t[]>(new uint8_t[cdLen]);
+        cdBuf = std::make_unique<uint8_t[]>(cdLen);
 
         VerifyOrReturnError(ReadFileIntoMem(fileNameOrStr, cdBuf.get(), cdLen), false);
 
@@ -193,7 +196,7 @@ bool ReadCD(const char * fileNameOrStr, MutableByteSpan cd)
             return false;
         }
 
-        cdBuf = std::unique_ptr<uint8_t[]>(new uint8_t[cdLen]);
+        cdBuf = std::make_unique<uint8_t[]>(cdLen);
         memcpy(cdBuf.get(), fileNameOrStr, cdLen);
     }
 
@@ -242,7 +245,7 @@ bool PrintCD(ByteSpan cd)
     VerifyOrReturnError(CMS_ExtractCDContent(cd, cdContent) == CHIP_NO_ERROR, false);
 
     signerKeyIdHexLen = 2 * static_cast<uint32_t>(signerKeyId.size()) + 1;
-    signerKeyIdHex    = std::unique_ptr<char[]>(new char[signerKeyIdHexLen]);
+    signerKeyIdHex    = std::make_unique<char[]>(signerKeyIdHexLen);
     VerifyOrReturnError(Encoding::BytesToUppercaseHexString(signerKeyId.data(), signerKeyId.size(), signerKeyIdHex.get(),
                                                             signerKeyIdHexLen) == CHIP_NO_ERROR,
                         false);

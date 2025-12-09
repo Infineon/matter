@@ -37,6 +37,10 @@
 #include <lwip/err.h>
 #endif // CHIP_SYSTEM_CONFIG_USE_LWIP
 
+#if CHIP_SYSTEM_CONFIG_USE_NETXDUO
+#include <nx_api.h>
+#endif //CHIP_SYSTEM_CONFIG_USE_NETXDUO
+ 
 #include <limits>
 #include <stddef.h>
 #include <string.h>
@@ -214,6 +218,57 @@ bool FormatLwIPError(char * buf, uint16_t bufSize, CHIP_ERROR err)
 }
 
 #endif // CHIP_SYSTEM_CONFIG_USE_LWIP
+
+#if CHIP_SYSTEM_CONFIG_USE_NETXDUO
+
+/**
+ * This implements a mapping function for CHIP System Layer errors that allows mapping underlying NetXDuo network stack errors into a
+ * platform- or system-specific range.
+ *
+ *  @param[in] aError  The NetXDuo error to map.
+ *
+ *  @return The mapped NetXDuo network or OS error.
+ *
+ */
+DLL_EXPORT CHIP_ERROR MapErrorNetXDuo(UINT aError)
+{
+    static_assert(ChipError::CanEncapsulate(-std::numeric_limits<UINT>::min()), "Can't represent all NETXDUO errors");
+    return (aError == NX_SUCCESS ? CHIP_NO_ERROR : CHIP_ERROR(ChipError::Range::kNetXDuo, aError));
+}
+
+/**
+ * Register a text error formatter for NetXDuo errors.
+ */
+void RegisterNetXDuoErrorFormatter()
+{
+    static ErrorFormatter sNetXDuoErrorFormatter = { FormatNetXDuoError, nullptr };
+
+    RegisterErrorFormatter(&sNetXDuoErrorFormatter);
+}
+
+/**
+ * Given an NetXDuo error, returns a human-readable NULL-terminated C string
+ * describing the error.
+ *
+ * @param[in] buf                   Buffer into which the error string will be placed.
+ * @param[in] bufSize               Size of the supplied buffer in bytes.
+ * @param[in] err                   The error to be described.
+ *
+ * @return true                     If a description string was written into the supplied buffer.
+ * @return false                    If the supplied error was not an NetXDuo error.
+ *
+ */
+bool FormatNetXDuoError(char * buf, uint16_t bufSize, CHIP_ERROR err)
+{
+    if (err.IsRange(ChipError::Range::kNetXDuo))
+    {
+        chip::FormatError(buf, bufSize, "NetXDuo", err, nullptr);
+        return true;
+    }
+    return false;
+}
+
+#endif // CHIP_SYSTEM_CONFIG_USE_NETXDUO
 
 } // namespace System
 } // namespace chip

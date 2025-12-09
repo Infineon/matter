@@ -23,10 +23,6 @@
  *
  */
 
-#ifndef __STDC_LIMIT_MACROS
-#define __STDC_LIMIT_MACROS
-#endif
-
 #include "chip-cert.h"
 
 #include <credentials/CertificationDeclaration.h>
@@ -404,7 +400,7 @@ bool HandleOption(const char * progName, OptionSet * optSet, int id, const char 
         }
         break;
     case 'p':
-        if (gCertElements.ProductIdsCount == ArraySize(gCertElements.ProductIds))
+        if (gCertElements.ProductIdsCount == MATTER_ARRAY_SIZE(gCertElements.ProductIds))
         {
             PrintArgError("%s: Too many Product Ids are specified: %s\n", progName, arg);
             return false;
@@ -478,7 +474,7 @@ bool HandleOption(const char * progName, OptionSet * optSet, int id, const char 
         gCertElements.DACOriginVIDandPIDPresent = true;
         break;
     case 'a':
-        if (gCertElements.AuthorizedPAAListCount >= ArraySize(gCertElements.AuthorizedPAAList))
+        if (gCertElements.AuthorizedPAAListCount >= MATTER_ARRAY_SIZE(gCertElements.AuthorizedPAAList))
         {
             PrintArgError("%s: Too many Authorized PAA Certificates are specified: %s\n", progName, arg);
             return false;
@@ -1000,7 +996,7 @@ CHIP_ERROR EncodeSignerInfo_Ignor_Error(const ByteSpan & signerKeyId, const P256
 
             uint8_t asn1SignatureBuf[kMax_ECDSA_Signature_Length_Der];
             MutableByteSpan asn1Signature(asn1SignatureBuf);
-            ReturnErrorOnFailure(EcdsaRawSignatureToAsn1(kP256_FE_Length, signature.Span(), asn1Signature));
+            ReturnErrorOnFailure(ConvertECDSASignatureRawToDER(P256ECDSASignatureSpan(signature.ConstBytes()), asn1Signature));
 
             if (!cdConfig.IsCMSSignatureCorrect())
             {

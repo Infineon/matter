@@ -36,6 +36,7 @@
 #include <credentials/GroupDataProvider.h>
 #include <crypto/SessionKeystore.h>
 #include <lib/core/CHIPConfig.h>
+#include <protocols/bdx/BdxTransferServer.h>
 #include <protocols/secure_channel/CASEServer.h>
 #include <protocols/secure_channel/MessageCounterManager.h>
 #include <protocols/secure_channel/SimpleSessionResumptionStorage.h>
@@ -48,24 +49,52 @@
 #endif
 
 #if CONFIG_NETWORK_LAYER_BLE
-#include <ble/BleLayer.h>
+#include <ble/Ble.h>
 #include <transport/raw/BLE.h>
+#endif
+#if CHIP_DEVICE_CONFIG_ENABLE_WIFIPAF
+#include <transport/raw/WiFiPAF.h>
+#endif
+#if CHIP_DEVICE_CONFIG_ENABLE_NFC_BASED_COMMISSIONING
+#include <transport/raw/NFC.h>
 #endif
 
 namespace chip {
 
 inline constexpr size_t kMaxDeviceTransportBlePendingPackets = 1;
+#if CHIP_DEVICE_CONFIG_ENABLE_WIFIPAF
+inline constexpr size_t kMaxDeviceTransportWiFiPAFPendingPackets = 1;
+#endif
 
-using DeviceTransportMgr = TransportMgr<Transport::UDP /* IPv6 */
+#if INET_CONFIG_ENABLE_TCP_ENDPOINT
+inline constexpr size_t kMaxDeviceTransportTcpActiveConnectionCount = CHIP_CONFIG_MAX_ACTIVE_TCP_CONNECTIONS;
+
+inline constexpr size_t kMaxDeviceTransportTcpPendingPackets = CHIP_CONFIG_MAX_TCP_PENDING_PACKETS;
+#endif // INET_CONFIG_ENABLE_TCP_ENDPOINT
+
+using DeviceTransportMgr =
+    TransportMgr<Transport::UDP /* IPv6 */
 #if INET_CONFIG_ENABLE_IPV4
-                                        ,
-                                        Transport::UDP /* IPv4 */
+                 ,
+                 Transport::UDP /* IPv4 */
 #endif
 #if CONFIG_NETWORK_LAYER_BLE
-                                        ,
-                                        Transport::BLE<kMaxDeviceTransportBlePendingPackets> /* BLE */
+                 ,
+                 Transport::BLE<kMaxDeviceTransportBlePendingPackets> /* BLE */
 #endif
-                                        >;
+#if INET_CONFIG_ENABLE_TCP_ENDPOINT
+                 ,
+                 Transport::TCP<kMaxDeviceTransportTcpActiveConnectionCount, kMaxDeviceTransportTcpPendingPackets>
+#endif
+#if CHIP_DEVICE_CONFIG_ENABLE_WIFIPAF
+                 ,
+                 Transport::WiFiPAF<kMaxDeviceTransportWiFiPAFPendingPackets> /* WiFiPAF */
+#endif
+#if CHIP_DEVICE_CONFIG_ENABLE_NFC_BASED_COMMISSIONING
+                 ,
+                 Transport::NFC /* NFC */
+#endif
+                 >;
 
 namespace Controller {
 
@@ -81,6 +110,9 @@ struct DeviceControllerSystemStateParams
     FabricTable * fabricTable                                     = nullptr;
 #if CONFIG_NETWORK_LAYER_BLE
     Ble::BleLayer * bleLayer = nullptr;
+#endif
+#if CHIP_DEVICE_CONFIG_ENABLE_WIFIPAF
+    WiFiPAF::WiFiPAFLayer * wifipaf_layer = nullptr;
 #endif
     Credentials::GroupDataProvider * groupDataProvider = nullptr;
     Crypto::SessionKeystore * sessionKeystore          = nullptr;
@@ -102,6 +134,7 @@ struct DeviceControllerSystemStateParams
     Protocols::SecureChannel::UnsolicitedStatusHandler * unsolicitedStatusHandler = nullptr;
     Messaging::ExchangeManager * exchangeMgr                                      = nullptr;
     secure_channel::MessageCounterManager * messageCounterManager                 = nullptr;
+    bdx::BDXTransferServer * bdxTransferServer                                    = nullptr;
     CASEServer * caseServer                                                       = nullptr;
     CASESessionManager * caseSessionManager                                       = nullptr;
     SessionSetupPool * sessionSetupPool                                           = nullptr;
@@ -136,7 +169,8 @@ public:
         mSystemLayer(params.systemLayer), mTCPEndPointManager(params.tcpEndPointManager),
         mUDPEndPointManager(params.udpEndPointManager), mTransportMgr(params.transportMgr), mSessionMgr(params.sessionMgr),
         mUnsolicitedStatusHandler(params.unsolicitedStatusHandler), mExchangeMgr(params.exchangeMgr),
-        mMessageCounterManager(params.messageCounterManager), mFabrics(params.fabricTable), mCASEServer(params.caseServer),
+        mMessageCounterManager(params.messageCounterManager), mFabrics(params.fabricTable),
+        mBDXTransferServer(params.bdxTransferServer), mCASEServer(params.caseServer),
         mCASESessionManager(params.caseSessionManager), mSessionSetupPool(params.sessionSetupPool),
         mCASEClientPool(params.caseClientPool), mGroupDataProvider(params.groupDataProvider), mTimerDelegate(params.timerDelegate),
         mReportScheduler(params.reportScheduler), mSessionKeystore(params.sessionKeystore),
@@ -164,8 +198,9 @@ public:
     // should be called to release the reference once it is no longer needed.
     DeviceControllerSystemState * Retain()
     {
-        VerifyOrDie(mRefCount < std::numeric_limits<uint32_t>::max());
-        ++mRefCount;
+        auto count = mRefCount++;
+        VerifyOrDie(count < std::numeric_limits<decltype(count)>::max()); // overflow
+        VerifyOrDie(!IsShutDown());                                       // avoid zombie
         return this;
     };
 
@@ -173,16 +208,17 @@ public:
     //
     // The stack will shut down when all references are released.
     //
-    // NB: The system state is owned by the factory; Relase() will not free it
+    // NB: The system state is owned by the factory; Release() will not free it
     // but will free its members (Shutdown()).
-    void Release()
+    //
+    // Returns true if the system state was shut down in response to this call.
+    bool Release()
     {
-        VerifyOrDie(mRefCount > 0);
-
-        if (--mRefCount == 0)
-        {
-            Shutdown();
-        }
+        auto count = mRefCount--;
+        VerifyOrDie(count > 0); // underflow
+        VerifyOrReturnValue(count == 1, false);
+        Shutdown();
+        return true;
     };
     bool IsInitialized()
     {
@@ -190,8 +226,9 @@ public:
             mUnsolicitedStatusHandler != nullptr && mExchangeMgr != nullptr && mMessageCounterManager != nullptr &&
             mFabrics != nullptr && mCASESessionManager != nullptr && mSessionSetupPool != nullptr && mCASEClientPool != nullptr &&
             mGroupDataProvider != nullptr && mReportScheduler != nullptr && mTimerDelegate != nullptr &&
-            mSessionKeystore != nullptr && mSessionResumptionStorage != nullptr;
+            mSessionKeystore != nullptr && mSessionResumptionStorage != nullptr && mBDXTransferServer != nullptr;
     };
+    bool IsShutDown() const { return mHaveShutDown; }
 
     System::Layer * SystemLayer() const { return mSystemLayer; };
     Inet::EndPointManager<Inet::TCPEndPoint> * TCPEndPointManager() const { return mTCPEndPointManager; };
@@ -207,6 +244,7 @@ public:
     CASESessionManager * CASESessionMgr() const { return mCASESessionManager; }
     Credentials::GroupDataProvider * GetGroupDataProvider() const { return mGroupDataProvider; }
     chip::app::reporting::ReportScheduler * GetReportScheduler() const { return mReportScheduler; }
+    SessionResumptionStorage * GetSessionResumptionStorage() const { return mSessionResumptionStorage; }
 
     Crypto::SessionKeystore * GetSessionKeystore() const { return mSessionKeystore; }
     void SetTempFabricTable(FabricTable * tempFabricTable, bool enableServerInteractions)
@@ -214,6 +252,7 @@ public:
         mTempFabricTable          = tempFabricTable;
         mEnableServerInteractions = enableServerInteractions;
     }
+    bdx::BDXTransferServer * BDXTransferServer() const { return mBDXTransferServer; }
 
 private:
     DeviceControllerSystemState() {}
@@ -230,6 +269,7 @@ private:
     Messaging::ExchangeManager * mExchangeMgr                                      = nullptr;
     secure_channel::MessageCounterManager * mMessageCounterManager                 = nullptr;
     FabricTable * mFabrics                                                         = nullptr;
+    bdx::BDXTransferServer * mBDXTransferServer                                    = nullptr;
     CASEServer * mCASEServer                                                       = nullptr;
     CASESessionManager * mCASESessionManager                                       = nullptr;
     SessionSetupPool * mSessionSetupPool                                           = nullptr;

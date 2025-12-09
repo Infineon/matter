@@ -15,23 +15,32 @@
  *    See the License for the specific language governing permissions and
  *    limitations under the License.
  */
+#include <lib/core/TLVReader.h>
 
-/**
- *    @file
- *      This file implements a parser for the CHIP TLV (Tag-Length-Value) encoding format.
- *
- */
+#include <stdint.h>
+#include <string.h>
 
-#include <stdlib.h>
-
-#include <lib/core/CHIPCore.h>
+#include <lib/core/CHIPConfig.h>
 #include <lib/core/CHIPEncoding.h>
+#include <lib/core/CHIPError.h>
 #include <lib/core/CHIPSafeCasts.h>
-#include <lib/core/TLV.h>
+#include <lib/core/DataModelTypes.h>
+#include <lib/core/Optional.h>
+#include <lib/core/TLVBackingStore.h>
+#include <lib/core/TLVCommon.h>
+#include <lib/core/TLVTags.h>
+#include <lib/core/TLVTypes.h>
+#include <lib/support/BufferWriter.h>
 #include <lib/support/BytesToHex.h>
 #include <lib/support/CHIPMem.h>
 #include <lib/support/CodeUtils.h>
 #include <lib/support/SafeInt.h>
+#include <lib/support/Span.h>
+#include <lib/support/logging/TextOnlyLogging.h>
+
+#if CHIP_CONFIG_TLV_VALIDATE_CHAR_STRING_ON_READ
+#include <lib/support/utf8.h>
+#endif
 
 namespace chip {
 namespace TLV {
@@ -39,6 +48,12 @@ namespace TLV {
 using namespace chip::Encoding;
 
 static const uint8_t sTagSizes[] = { 0, 1, 2, 4, 2, 4, 6, 8 };
+
+TLVReader::TLVReader() :
+    ImplicitProfileId(kProfileIdNotSpecified), AppData(nullptr), mElemLenOrVal(0), mBackingStore(nullptr), mReadPoint(nullptr),
+    mBufEnd(nullptr), mLenRead(0), mMaxLen(0), mContainerType(kTLVType_NotSpecified), mControlByte(kTLVControlByte_NotSpecified),
+    mContainerOpen(false)
+{}
 
 void TLVReader::Init(const uint8_t * data, size_t dataLen)
 {
@@ -330,6 +345,25 @@ CHIP_ERROR TLVReader::Get(CharSpan & v) const
     }
 
     v = CharSpan(Uint8::to_const_char(bytes), len);
+#if CHIP_CONFIG_TLV_VALIDATE_CHAR_STRING_ON_READ
+    // Spec requirement: A.11.2. UTF-8 and Octet Strings
+    //
+    // For UTF-8 strings, the value octets SHALL encode a valid
+    // UTF-8 character (code points) sequence.
+    //
+    // Senders SHALL NOT include a terminating null character to
+    // mark the end of a string.
+
+    if (!Utf8::IsValid(v))
+    {
+        return CHIP_ERROR_INVALID_UTF8;
+    }
+
+    if (!v.empty() && (v.back() == 0))
+    {
+        return CHIP_ERROR_INVALID_TLV_CHAR_STRING;
+    }
+#endif // CHIP_CONFIG_TLV_VALIDATE_CHAR_STRING_ON_READ
     return CHIP_NO_ERROR;
 }
 
@@ -583,53 +617,48 @@ CHIP_ERROR TLVReader::Next()
     return CHIP_NO_ERROR;
 }
 
+CHIP_ERROR TLVReader::Expect(Tag expectedTag)
+{
+    VerifyOrReturnError(GetType() != kTLVType_NotSpecified, CHIP_ERROR_WRONG_TLV_TYPE);
+    VerifyOrReturnError(GetTag() == expectedTag, CHIP_ERROR_UNEXPECTED_TLV_ELEMENT);
+    return CHIP_NO_ERROR;
+}
+
 CHIP_ERROR TLVReader::Next(Tag expectedTag)
 {
-    CHIP_ERROR err = Next();
-    if (err != CHIP_NO_ERROR)
-        return err;
-    if (mElemTag != expectedTag)
-        return CHIP_ERROR_UNEXPECTED_TLV_ELEMENT;
+    ReturnErrorOnFailure(Next());
+    ReturnErrorOnFailure(Expect(expectedTag));
+    return CHIP_NO_ERROR;
+}
+
+CHIP_ERROR TLVReader::Expect(TLVType expectedType, Tag expectedTag)
+{
+    VerifyOrReturnError(GetType() == expectedType, CHIP_ERROR_WRONG_TLV_TYPE);
+    VerifyOrReturnError(GetTag() == expectedTag, CHIP_ERROR_UNEXPECTED_TLV_ELEMENT);
     return CHIP_NO_ERROR;
 }
 
 CHIP_ERROR TLVReader::Next(TLVType expectedType, Tag expectedTag)
 {
-    CHIP_ERROR err = Next(expectedTag);
-    if (err != CHIP_NO_ERROR)
-        return err;
-    if (GetType() != expectedType)
-        return CHIP_ERROR_WRONG_TLV_TYPE;
+    ReturnErrorOnFailure(Next());
+    ReturnErrorOnFailure(Expect(expectedType, expectedTag));
     return CHIP_NO_ERROR;
 }
 
 CHIP_ERROR TLVReader::Skip()
 {
-    CHIP_ERROR err;
-    TLVElementType elemType = ElementType();
-
-    if (elemType == TLVElementType::EndOfContainer)
-        return CHIP_END_OF_TLV;
+    const TLVElementType elemType = ElementType();
+    VerifyOrReturnError(elemType != TLVElementType::EndOfContainer, CHIP_END_OF_TLV);
 
     if (TLVTypeIsContainer(elemType))
     {
         TLVType outerContainerType;
-        err = EnterContainer(outerContainerType);
-        if (err != CHIP_NO_ERROR)
-            return err;
-        err = ExitContainer(outerContainerType);
-        if (err != CHIP_NO_ERROR)
-            return err;
+        ReturnErrorOnFailure(EnterContainer(outerContainerType));
+        return ExitContainer(outerContainerType);
     }
 
-    else
-    {
-        err = SkipData();
-        if (err != CHIP_NO_ERROR)
-            return err;
-
-        ClearElementState();
-    }
+    ReturnErrorOnFailure(SkipData());
+    ClearElementState();
 
     return CHIP_NO_ERROR;
 }
@@ -663,8 +692,6 @@ CHIP_ERROR TLVReader::SkipData()
     if (TLVTypeHasLength(elemType))
     {
         err = ReadData(nullptr, static_cast<uint32_t>(mElemLenOrVal));
-        if (err != CHIP_NO_ERROR)
-            return err;
     }
 
     return err;
@@ -713,27 +740,16 @@ CHIP_ERROR TLVReader::SkipToEndOfContainer()
 
 CHIP_ERROR TLVReader::ReadElement()
 {
-    CHIP_ERROR err;
-    uint8_t stagingBuf[17]; // 17 = 1 control byte + 8 tag bytes + 8 length/value bytes
-    const uint8_t * p;
-    TLVElementType elemType;
-
     // Make sure we have input data. Return CHIP_END_OF_TLV if no more data is available.
-    err = EnsureData(CHIP_END_OF_TLV);
-    if (err != CHIP_NO_ERROR)
-        return err;
+    ReturnErrorOnFailure(EnsureData(CHIP_END_OF_TLV));
+    VerifyOrReturnError(mReadPoint != nullptr, CHIP_ERROR_INVALID_TLV_ELEMENT);
 
-    if (mReadPoint == nullptr)
-    {
-        return CHIP_ERROR_INVALID_TLV_ELEMENT;
-    }
     // Get the element's control byte.
     mControlByte = *mReadPoint;
 
     // Extract the element type from the control byte. Fail if it's invalid.
-    elemType = ElementType();
-    if (!IsValidTLVType(elemType))
-        return CHIP_ERROR_INVALID_TLV_ELEMENT;
+    TLVElementType elemType = ElementType();
+    VerifyOrReturnError(IsValidTLVType(elemType), CHIP_ERROR_INVALID_TLV_ELEMENT);
 
     // Extract the tag control from the control byte.
     TLVTagControl tagControl = static_cast<TLVTagControl>(mControlByte & kTLVTagControlMask);
@@ -745,54 +761,40 @@ CHIP_ERROR TLVReader::ReadElement()
     TLVFieldSize lenOrValFieldSize = GetTLVFieldSize(elemType);
 
     // Determine the number of bytes in the length/value field.
-    uint8_t valOrLenBytes = TLVFieldSizeToBytes(lenOrValFieldSize);
+    const uint8_t valOrLenBytes = TLVFieldSizeToBytes(lenOrValFieldSize);
 
     // Determine the number of bytes in the element's 'head'. This includes: the control byte, the tag bytes (if present), the
     // length bytes (if present), and for elements that don't have a length (e.g. integers), the value bytes.
-    uint8_t elemHeadBytes = static_cast<uint8_t>(1 + tagBytes + valOrLenBytes);
+    const uint8_t elemHeadBytes = static_cast<uint8_t>(1 + tagBytes + valOrLenBytes);
 
-    // If the head of the element overlaps the end of the input buffer, read the bytes into the staging buffer
-    // and arrange to parse them from there. Otherwise read them directly from the input buffer.
-    if (elemHeadBytes > (mBufEnd - mReadPoint))
-    {
-        err = ReadData(stagingBuf, elemHeadBytes);
-        if (err != CHIP_NO_ERROR)
-            return err;
-        p = stagingBuf;
-    }
-    else
-    {
-        p = mReadPoint;
-        mReadPoint += elemHeadBytes;
-        mLenRead += elemHeadBytes;
-    }
+    // 17 = 1 control byte + 8 tag bytes + 8 length/value bytes
+    uint8_t stagingBuf[17];
 
-    // Skip over the control byte.
-    p++;
+    // Odd workaround: clang-tidy claims garbage value otherwise as it does not
+    // understand that ReadData initializes stagingBuf
+    stagingBuf[1] = 0;
+
+    // If the head of the element goes past the end of the current input buffer,
+    // we need to read it into the staging buffer to parse it.  Just do that unconditionally,
+    // even if the head does not go past end of current buffer, to save codesize.
+    ReturnErrorOnFailure(ReadData(stagingBuf, elemHeadBytes));
+
+    // +1 to skip over the control byte
+    const uint8_t * p = stagingBuf + 1;
 
     // Read the tag field, if present.
-    mElemTag = ReadTag(tagControl, p);
+    mElemTag      = ReadTag(tagControl, p);
+    mElemLenOrVal = 0;
 
     // Read the length/value field, if present.
-    switch (lenOrValFieldSize)
-    {
-    case kTLVFieldSize_0Byte:
-        mElemLenOrVal = 0;
-        break;
-    case kTLVFieldSize_1Byte:
-        mElemLenOrVal = Read8(p);
-        break;
-    case kTLVFieldSize_2Byte:
-        mElemLenOrVal = LittleEndian::Read16(p);
-        break;
-    case kTLVFieldSize_4Byte:
-        mElemLenOrVal = LittleEndian::Read32(p);
-        break;
-    case kTLVFieldSize_8Byte:
-        mElemLenOrVal = LittleEndian::Read64(p);
-        VerifyOrReturnError(!TLVTypeHasLength(elemType) || (mElemLenOrVal <= UINT32_MAX), CHIP_ERROR_NOT_IMPLEMENTED);
-        break;
-    }
+    // NOTE: this is works because even though we only memcpy a subset of values and leave
+    //       the rest 0. Value looks like "<le-byte> <le-byte> ... <le-byte> 0 0 ... 0"
+    //       which is the TLV format. HostSwap ensures this becomes a real host value
+    //       (should be a NOOP on LE machines, will full-swap on big-endian machines)
+    memcpy(&mElemLenOrVal, p, valOrLenBytes);
+    LittleEndian::HostSwap(mElemLenOrVal);
+
+    VerifyOrReturnError(!TLVTypeHasLength(elemType) || (mElemLenOrVal <= UINT32_MAX), CHIP_ERROR_NOT_IMPLEMENTED);
 
     return VerifyElement();
 }
@@ -887,13 +889,9 @@ Tag TLVReader::ReadTag(TLVTagControl tagControl, const uint8_t *& p) const
 
 CHIP_ERROR TLVReader::ReadData(uint8_t * buf, uint32_t len)
 {
-    CHIP_ERROR err;
-
     while (len > 0)
     {
-        err = EnsureData(CHIP_ERROR_TLV_UNDERRUN);
-        if (err != CHIP_NO_ERROR)
-            return err;
+        ReturnErrorOnFailure(EnsureData(CHIP_ERROR_TLV_UNDERRUN));
 
         uint32_t remainingLen = static_cast<decltype(mMaxLen)>(mBufEnd - mReadPoint);
 
@@ -916,29 +914,17 @@ CHIP_ERROR TLVReader::ReadData(uint8_t * buf, uint32_t len)
 
 CHIP_ERROR TLVReader::EnsureData(CHIP_ERROR noDataErr)
 {
-    CHIP_ERROR err;
-
     if (mReadPoint == mBufEnd)
     {
-        if (mLenRead == mMaxLen)
-            return noDataErr;
-
-        if (mBackingStore == nullptr)
-            return noDataErr;
+        VerifyOrReturnError((mLenRead != mMaxLen) && (mBackingStore != nullptr), noDataErr);
 
         uint32_t bufLen;
-        err = mBackingStore->GetNextBuffer(*this, mReadPoint, bufLen);
-        if (err != CHIP_NO_ERROR)
-            return err;
-        if (bufLen == 0)
-            return noDataErr;
+        ReturnErrorOnFailure(mBackingStore->GetNextBuffer(*this, mReadPoint, bufLen));
+        VerifyOrReturnError(bufLen > 0, noDataErr);
 
         // Cap mBufEnd so that we don't read beyond the user's specified maximum length, even
         // if the underlying buffer is larger.
-        uint32_t overallLenRemaining = mMaxLen - mLenRead;
-        if (overallLenRemaining < bufLen)
-            bufLen = overallLenRemaining;
-
+        bufLen  = std::min(bufLen, mMaxLen - mLenRead);
         mBufEnd = mReadPoint + bufLen;
     }
 

@@ -15,58 +15,86 @@
  *    See the License for the specific language governing permissions and
  *    limitations under the License.
  */
-
-/**
- *    @file
- *      This file implements an encoder for the CHIP TLV (Tag-Length-Value) encoding format.
- *
- */
-
-#ifndef __STDC_LIMIT_MACROS
-#define __STDC_LIMIT_MACROS
-#endif
-#include <lib/core/TLV.h>
-
-#include <lib/core/CHIPCore.h>
-#include <lib/core/CHIPEncoding.h>
-
-#include <lib/support/CHIPMem.h>
-#include <lib/support/CodeUtils.h>
-#include <lib/support/SafeInt.h>
+#include <lib/core/TLVWriter.h>
 
 #include <stdarg.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
+
+#include <lib/core/CHIPConfig.h>
+#include <lib/core/CHIPEncoding.h>
+#include <lib/core/CHIPError.h>
+#include <lib/core/TLVBackingStore.h>
+#include <lib/core/TLVCommon.h>
+#include <lib/core/TLVReader.h>
+#include <lib/core/TLVTags.h>
+#include <lib/core/TLVTypes.h>
+#include <lib/support/BufferWriter.h>
+#include <lib/support/CHIPMem.h>
+#include <lib/support/CodeUtils.h>
+#include <lib/support/SafeInt.h>
+#include <lib/support/Span.h>
+#include <lib/support/logging/Constants.h>
+#include <lib/support/logging/TextOnlyLogging.h>
+#include <lib/support/utf8.h>
+#include <system/SystemConfig.h>
 
 // Doxygen is confused by the __attribute__ annotation
 #ifndef DOXYGEN
 #define NO_INLINE __attribute__((noinline))
 #endif // DOXYGEN
 
+// You can enable this block manually to abort on usage of uninitialized writers in
+// your codebase. There are no such usages in the SDK (outside of tests).
+#if 0
+#define ABORT_ON_UNINITIALIZED_IF_ENABLED() VerifyOrDie(IsInitialized() == true)
+#else
+#define ABORT_ON_UNINITIALIZED_IF_ENABLED()                                                                                        \
+    do                                                                                                                             \
+    {                                                                                                                              \
+    } while (0)
+#endif
+
 namespace chip {
 namespace TLV {
 
 using namespace chip::Encoding;
 
+TLVWriter::TLVWriter() :
+    ImplicitProfileId(kProfileIdNotSpecified), AppData(nullptr), mBackingStore(nullptr), mBufStart(nullptr), mWritePoint(nullptr),
+    mRemainingLen(0), mLenWritten(0), mMaxLen(0), mReservedSize(0), mContainerType(kTLVType_NotSpecified), mInitializationCookie(0),
+    mContainerOpen(false), mCloseContainerReserved(true)
+{}
+
 NO_INLINE void TLVWriter::Init(uint8_t * buf, size_t maxLen)
 {
     // TODO: Maybe we can just make mMaxLen, mLenWritten, mRemainingLen size_t instead?
     uint32_t actualMaxLen = maxLen > UINT32_MAX ? UINT32_MAX : static_cast<uint32_t>(maxLen);
+
+    // TODO(#30825): Need to ensure a single init path for this complex data.
+    mInitializationCookie = 0;
     mBackingStore         = nullptr;
-    mBufStart = mWritePoint = buf;
-    mRemainingLen           = actualMaxLen;
-    mLenWritten             = 0;
-    mMaxLen                 = actualMaxLen;
-    mContainerType          = kTLVType_NotSpecified;
-    mReservedSize           = 0;
+    mBufStart             = buf;
+    mWritePoint           = buf;
+    mRemainingLen         = actualMaxLen;
+    mLenWritten           = 0;
+    mMaxLen               = actualMaxLen;
+    mContainerType        = kTLVType_NotSpecified;
+    mReservedSize         = 0;
     SetContainerOpen(false);
     SetCloseContainerReserved(true);
 
-    ImplicitProfileId = kProfileIdNotSpecified;
+    ImplicitProfileId     = kProfileIdNotSpecified;
+    mInitializationCookie = kExpectedInitializationCookie;
 }
 
-CHIP_ERROR TLVWriter::Init(TLVBackingStore & backingStore, uint32_t maxLen)
+CHIP_ERROR TLVWriter::Init(TLVBackingStore & backingStore, uint32_t maxLen /* = UINT32_MAX */)
 {
+    // TODO(#30825): Need to ensure a single init path for this complex data.
+    Init(nullptr, maxLen);
+    mInitializationCookie = 0;
+
     mBackingStore  = &backingStore;
     mBufStart      = nullptr;
     mRemainingLen  = 0;
@@ -74,26 +102,46 @@ CHIP_ERROR TLVWriter::Init(TLVBackingStore & backingStore, uint32_t maxLen)
     if (err != CHIP_NO_ERROR)
         return err;
 
-    mWritePoint    = mBufStart;
-    mLenWritten    = 0;
-    mMaxLen        = maxLen;
-    mContainerType = kTLVType_NotSpecified;
-    mReservedSize  = 0;
-    SetContainerOpen(false);
-    SetCloseContainerReserved(true);
-
-    ImplicitProfileId = kProfileIdNotSpecified;
+    VerifyOrReturnError(mBufStart != nullptr, CHIP_ERROR_INTERNAL);
+    mWritePoint           = mBufStart;
+    mInitializationCookie = kExpectedInitializationCookie;
     return CHIP_NO_ERROR;
 }
 
 CHIP_ERROR TLVWriter::Finalize()
 {
+    ABORT_ON_UNINITIALIZED_IF_ENABLED();
+
+    VerifyOrReturnError(IsInitialized(), CHIP_ERROR_INCORRECT_STATE);
+
     CHIP_ERROR err = CHIP_NO_ERROR;
     if (IsContainerOpen())
         return CHIP_ERROR_TLV_CONTAINER_OPEN;
     if (mBackingStore != nullptr)
         err = mBackingStore->FinalizeBuffer(*this, mBufStart, static_cast<uint32_t>(mWritePoint - mBufStart));
+
+        // TODO(#30825) The following should be safe, but in some cases (without mBackingStore), there are incremental writes that
+        // start failing.
+#if 0
+    if (err == CHIP_NO_ERROR)
+        mInitializationCookie = 0;
+#endif
+
     return err;
+}
+
+CHIP_ERROR TLVWriter::ReserveBuffer(uint32_t aBufferSize)
+{
+    VerifyOrReturnError(IsInitialized(), CHIP_ERROR_INCORRECT_STATE);
+    VerifyOrReturnError(mRemainingLen >= aBufferSize, CHIP_ERROR_NO_MEMORY);
+
+    if (mBackingStore)
+    {
+        VerifyOrReturnError(mBackingStore->GetNewBufferWillAlwaysFail(), CHIP_ERROR_INCORRECT_STATE);
+    }
+    mReservedSize += aBufferSize;
+    mRemainingLen -= aBufferSize;
+    return CHIP_NO_ERROR;
 }
 
 CHIP_ERROR TLVWriter::PutBoolean(Tag tag, bool v)
@@ -242,20 +290,54 @@ CHIP_ERROR TLVWriter::PutBytes(Tag tag, const uint8_t * buf, uint32_t len)
 
 CHIP_ERROR TLVWriter::PutString(Tag tag, const char * buf)
 {
-    size_t len = strlen(buf);
-    if (!CanCastTo<uint32_t>(len))
-    {
+    if (buf == nullptr)
         return CHIP_ERROR_INVALID_ARGUMENT;
-    }
-    return PutString(tag, buf, static_cast<uint32_t>(len));
+    if (mMaxLen == 0)
+        return CHIP_ERROR_INCORRECT_STATE;
+
+    // Calculate length with a hard limit to prevent unbounded reads.
+    // Use mMaxLen instead of mRemainingLen to account for CircularTLVWriter.
+    // Note: Overrun is still possible if buf is not null-terminated, and this
+    // check cannot prevent all invalid memory reads.
+    size_t len = strnlen(buf, mMaxLen);
+
+    if (!CanCastTo<uint32_t>(len))
+        return CHIP_ERROR_INVALID_ARGUMENT;
+
+    uint32_t stringLen = static_cast<uint32_t>(len);
+
+    // Null terminator was not found within the allocated space.
+    if (stringLen == mMaxLen)
+        return CHIP_ERROR_BUFFER_TOO_SMALL;
+    return PutString(tag, buf, stringLen);
 }
 
 CHIP_ERROR TLVWriter::PutString(Tag tag, const char * buf, uint32_t len)
 {
+#if CHIP_CONFIG_TLV_VALIDATE_CHAR_STRING_ON_WRITE
+    // Spec requirement: A.11.2. UTF-8 and Octet Strings
+    //
+    // For UTF-8 strings, the value octets SHALL encode a valid
+    // UTF-8 character (code points) sequence.
+    //
+    // Senders SHALL NOT include a terminating null character to
+    // mark the end of a string.
+
+    if (!Utf8::IsValid(CharSpan(buf, len)))
+    {
+        return CHIP_ERROR_INVALID_UTF8;
+    }
+
+    if ((len > 0) && (buf[len - 1] == 0))
+    {
+        return CHIP_ERROR_INVALID_TLV_CHAR_STRING;
+    }
+#endif // CHIP_CONFIG_TLV_VALIDATE_CHAR_STRING_ON_WRITE
+
     return WriteElementWithData(kTLVType_UTF8String, tag, reinterpret_cast<const uint8_t *>(buf), len);
 }
 
-CHIP_ERROR TLVWriter::PutString(Tag tag, Span<const char> str)
+CHIP_ERROR TLVWriter::PutString(Tag tag, CharSpan str)
 {
     if (!CanCastTo<uint32_t>(str.size()))
     {
@@ -297,11 +379,7 @@ CHIP_ERROR TLVWriter::VPutStringF(Tag tag, const char * fmt, va_list ap)
     size_t dataLen;
     CHIP_ERROR err = CHIP_NO_ERROR;
     TLVFieldSize lenFieldSize;
-#if CONFIG_HAVE_VSNPRINTF_EX
-    size_t skipLen;
-    size_t writtenBytes;
-#elif CONFIG_HAVE_VCBPRINTF
-#else
+#if !CONFIG_HAVE_VCBPRINTF
     char * tmpBuf;
 #endif
     va_copy(aq, ap);
@@ -330,47 +408,14 @@ CHIP_ERROR TLVWriter::VPutStringF(Tag tag, const char * fmt, va_list ap)
     VerifyOrExit((mLenWritten + dataLen) <= mMaxLen, err = CHIP_ERROR_BUFFER_TOO_SMALL);
 
     // write data
-#if CONFIG_HAVE_VSNPRINTF_EX
-
-    skipLen = 0;
-
-    do
-    {
-        va_copy(aq, ap);
-
-        vsnprintf_ex(reinterpret_cast<char *>(mWritePoint), mRemainingLen, skipLen, fmt, aq);
-
-        va_end(aq);
-
-        writtenBytes = (mRemainingLen >= (dataLen - skipLen)) ? dataLen - skipLen : mRemainingLen;
-        skipLen += writtenBytes;
-        mWritePoint += writtenBytes;
-        mRemainingLen -= writtenBytes;
-        mLenWritten += writtenBytes;
-        if (skipLen < dataLen)
-        {
-            VerifyOrExit(mBackingStore != NULL, err = CHIP_ERROR_NO_MEMORY);
-
-            err = mBackingStore->FinalizeBuffer(*this, mBufHandle, mBufStart, mWritePoint - mBufStart);
-            SuccessOrExit(err);
-
-            err = mBackingStore->GetNewBuffer(*this, mBufHandle, mBufStart, mRemainingLen);
-            SuccessOrExit(err);
-
-            mWritePoint = mBufStart;
-        }
-
-    } while (skipLen < dataLen);
-
-#elif CONFIG_HAVE_VCBPRINTF
+#if CONFIG_HAVE_VCBPRINTF
 
     va_copy(aq, ap);
 
     vcbprintf(TLVWriterPutcharCB, this, dataLen, fmt, aq);
 
     va_end(aq);
-
-#else // CONFIG_HAVE_VSNPRINTF_EX
+#else // CONFIG_HAVE_VCBPRINTF
 
     tmpBuf = static_cast<char *>(chip::Platform::MemoryAlloc(dataLen + 1));
     VerifyOrExit(tmpBuf != nullptr, err = CHIP_ERROR_NO_MEMORY);
@@ -384,7 +429,7 @@ CHIP_ERROR TLVWriter::VPutStringF(Tag tag, const char * fmt, va_list ap)
     err = WriteData(reinterpret_cast<uint8_t *>(tmpBuf), static_cast<uint32_t>(dataLen));
     chip::Platform::MemoryFree(tmpBuf);
 
-#endif // CONFIG_HAVE_VSNPRINTF_EX
+#endif // CONFIG_HAVE_VCBPRINTF
 
 exit:
 
@@ -442,6 +487,9 @@ CHIP_ERROR TLVWriter::CopyElement(Tag tag, TLVReader & reader)
 
 CHIP_ERROR TLVWriter::OpenContainer(Tag tag, TLVType containerType, TLVWriter & containerWriter)
 {
+    ABORT_ON_UNINITIALIZED_IF_ENABLED();
+
+    VerifyOrReturnError(IsInitialized(), CHIP_ERROR_INCORRECT_STATE);
     CHIP_ERROR err = CHIP_NO_ERROR;
 
     VerifyOrReturnError(TLVTypeIsContainer(containerType), CHIP_ERROR_WRONG_TLV_TYPE);
@@ -462,6 +510,7 @@ CHIP_ERROR TLVWriter::OpenContainer(Tag tag, TLVType containerType, TLVWriter & 
         return err;
     }
 
+    // TODO(#30825): Clean-up this separate init path path.
     containerWriter.mBackingStore  = mBackingStore;
     containerWriter.mBufStart      = mBufStart;
     containerWriter.mWritePoint    = mWritePoint;
@@ -471,7 +520,8 @@ CHIP_ERROR TLVWriter::OpenContainer(Tag tag, TLVType containerType, TLVWriter & 
     containerWriter.mContainerType = containerType;
     containerWriter.SetContainerOpen(false);
     containerWriter.SetCloseContainerReserved(IsCloseContainerReserved());
-    containerWriter.ImplicitProfileId = ImplicitProfileId;
+    containerWriter.ImplicitProfileId     = ImplicitProfileId;
+    containerWriter.mInitializationCookie = kExpectedInitializationCookie;
 
     SetContainerOpen(true);
 
@@ -480,6 +530,10 @@ CHIP_ERROR TLVWriter::OpenContainer(Tag tag, TLVType containerType, TLVWriter & 
 
 CHIP_ERROR TLVWriter::CloseContainer(TLVWriter & containerWriter)
 {
+    ABORT_ON_UNINITIALIZED_IF_ENABLED();
+
+    VerifyOrReturnError(IsInitialized(), CHIP_ERROR_INCORRECT_STATE);
+
     if (!TLVTypeIsContainer(containerWriter.mContainerType))
         return CHIP_ERROR_INCORRECT_STATE;
 
@@ -505,6 +559,9 @@ CHIP_ERROR TLVWriter::CloseContainer(TLVWriter & containerWriter)
 
 CHIP_ERROR TLVWriter::StartContainer(Tag tag, TLVType containerType, TLVType & outerContainerType)
 {
+    ABORT_ON_UNINITIALIZED_IF_ENABLED();
+
+    VerifyOrReturnError(IsInitialized(), CHIP_ERROR_INCORRECT_STATE);
     CHIP_ERROR err = CHIP_NO_ERROR;
 
     VerifyOrReturnError(TLVTypeIsContainer(containerType), CHIP_ERROR_WRONG_TLV_TYPE);
@@ -534,6 +591,10 @@ CHIP_ERROR TLVWriter::StartContainer(Tag tag, TLVType containerType, TLVType & o
 
 CHIP_ERROR TLVWriter::EndContainer(TLVType outerContainerType)
 {
+    ABORT_ON_UNINITIALIZED_IF_ENABLED();
+
+    VerifyOrReturnError(IsInitialized(), CHIP_ERROR_INCORRECT_STATE);
+
     if (!TLVTypeIsContainer(mContainerType))
         return CHIP_ERROR_INCORRECT_STATE;
 
@@ -564,6 +625,10 @@ CHIP_ERROR TLVWriter::CopyContainer(TLVReader & container)
 
 CHIP_ERROR TLVWriter::CopyContainer(Tag tag, TLVReader & container)
 {
+    ABORT_ON_UNINITIALIZED_IF_ENABLED();
+
+    VerifyOrReturnError(IsInitialized(), CHIP_ERROR_INCORRECT_STATE);
+
     // NOTE: This function MUST be used with a TVLReader that is reading from a contiguous buffer.
     if (container.mBackingStore != nullptr)
         return CHIP_ERROR_INVALID_ARGUMENT;
@@ -590,6 +655,8 @@ CHIP_ERROR TLVWriter::CopyContainer(Tag tag, TLVReader & container)
 
 CHIP_ERROR TLVWriter::CopyContainer(Tag tag, const uint8_t * encodedContainer, uint16_t encodedContainerLen)
 {
+    VerifyOrReturnError(IsInitialized(), CHIP_ERROR_INCORRECT_STATE);
+
     TLVReader reader;
 
     reader.Init(encodedContainer, encodedContainerLen);
@@ -603,18 +670,15 @@ CHIP_ERROR TLVWriter::CopyContainer(Tag tag, const uint8_t * encodedContainer, u
 
 CHIP_ERROR TLVWriter::WriteElementHead(TLVElementType elemType, Tag tag, uint64_t lenOrVal)
 {
-    uint8_t * p;
+    ABORT_ON_UNINITIALIZED_IF_ENABLED();
+
+    VerifyOrReturnError(IsInitialized(), CHIP_ERROR_INCORRECT_STATE);
+    VerifyOrReturnError(!IsContainerOpen(), CHIP_ERROR_TLV_CONTAINER_OPEN);
+
     uint8_t stagingBuf[17]; // 17 = 1 control byte + 8 tag bytes + 8 length/value bytes
-
-    if (IsContainerOpen())
-        return CHIP_ERROR_TLV_CONTAINER_OPEN;
-
     uint32_t tagNum = TagNumFromTag(tag);
 
-    if ((mRemainingLen >= sizeof(stagingBuf)) && (mMaxLen >= sizeof(stagingBuf)))
-        p = mWritePoint;
-    else
-        p = stagingBuf;
+    Encoding::LittleEndian::BufferWriter writer(stagingBuf, sizeof(stagingBuf));
 
     if (IsSpecialTag(tag))
     {
@@ -623,8 +687,8 @@ CHIP_ERROR TLVWriter::WriteElementHead(TLVElementType elemType, Tag tag, uint64_
             if (mContainerType != kTLVType_Structure && mContainerType != kTLVType_List)
                 return CHIP_ERROR_INVALID_TLV_TAG;
 
-            Write8(p, TLVTagControl::ContextSpecific | elemType);
-            Write8(p, static_cast<uint8_t>(tagNum));
+            writer.Put8(TLVTagControl::ContextSpecific | elemType);
+            writer.Put8(static_cast<uint8_t>(tagNum));
         }
         else
         {
@@ -632,7 +696,7 @@ CHIP_ERROR TLVWriter::WriteElementHead(TLVElementType elemType, Tag tag, uint64_
                 mContainerType != kTLVType_Array && mContainerType != kTLVType_List)
                 return CHIP_ERROR_INVALID_TLV_TAG;
 
-            Write8(p, TLVTagControl::Anonymous | elemType);
+            writer.Put8(TLVTagControl::Anonymous | elemType);
         }
     }
     else
@@ -644,28 +708,28 @@ CHIP_ERROR TLVWriter::WriteElementHead(TLVElementType elemType, Tag tag, uint64_
 
         if (profileId == kCommonProfileId)
         {
-            if (tagNum < 65536)
+            if (tagNum <= std::numeric_limits<uint16_t>::max())
             {
-                Write8(p, TLVTagControl::CommonProfile_2Bytes | elemType);
-                LittleEndian::Write16(p, static_cast<uint16_t>(tagNum));
+                writer.Put8(TLVTagControl::CommonProfile_2Bytes | elemType);
+                writer.Put16(static_cast<uint16_t>(tagNum));
             }
             else
             {
-                Write8(p, TLVTagControl::CommonProfile_4Bytes | elemType);
-                LittleEndian::Write32(p, tagNum);
+                writer.Put8(TLVTagControl::CommonProfile_4Bytes | elemType);
+                writer.Put32(tagNum);
             }
         }
         else if (profileId == ImplicitProfileId)
         {
-            if (tagNum < 65536)
+            if (tagNum <= std::numeric_limits<uint16_t>::max())
             {
-                Write8(p, TLVTagControl::ImplicitProfile_2Bytes | elemType);
-                LittleEndian::Write16(p, static_cast<uint16_t>(tagNum));
+                writer.Put8(TLVTagControl::ImplicitProfile_2Bytes | elemType);
+                writer.Put16(static_cast<uint16_t>(tagNum));
             }
             else
             {
-                Write8(p, TLVTagControl::ImplicitProfile_4Bytes | elemType);
-                LittleEndian::Write32(p, tagNum);
+                writer.Put8(TLVTagControl::ImplicitProfile_4Bytes | elemType);
+                writer.Put32(tagNum);
             }
         }
         else
@@ -673,54 +737,40 @@ CHIP_ERROR TLVWriter::WriteElementHead(TLVElementType elemType, Tag tag, uint64_
             uint16_t vendorId   = static_cast<uint16_t>(profileId >> 16);
             uint16_t profileNum = static_cast<uint16_t>(profileId);
 
-            if (tagNum < 65536)
+            if (tagNum <= std::numeric_limits<uint16_t>::max())
             {
-                Write8(p, TLVTagControl::FullyQualified_6Bytes | elemType);
-                LittleEndian::Write16(p, vendorId);
-                LittleEndian::Write16(p, profileNum);
-                LittleEndian::Write16(p, static_cast<uint16_t>(tagNum));
+
+                writer.Put8(TLVTagControl::FullyQualified_6Bytes | elemType);
+                writer.Put16(vendorId);
+                writer.Put16(profileNum);
+                writer.Put16(static_cast<uint16_t>(tagNum));
             }
             else
             {
-                Write8(p, TLVTagControl::FullyQualified_8Bytes | elemType);
-                LittleEndian::Write16(p, vendorId);
-                LittleEndian::Write16(p, profileNum);
-                LittleEndian::Write32(p, tagNum);
+                writer.Put8(TLVTagControl::FullyQualified_8Bytes | elemType);
+                writer.Put16(vendorId);
+                writer.Put16(profileNum);
+                writer.Put32(tagNum);
             }
         }
     }
 
-    switch (GetTLVFieldSize(elemType))
+    uint8_t lengthSize = TLVFieldSizeToBytes(GetTLVFieldSize(elemType));
+    if (lengthSize > 0)
     {
-    case kTLVFieldSize_0Byte:
-        break;
-    case kTLVFieldSize_1Byte:
-        Write8(p, static_cast<uint8_t>(lenOrVal));
-        break;
-    case kTLVFieldSize_2Byte:
-        LittleEndian::Write16(p, static_cast<uint16_t>(lenOrVal));
-        break;
-    case kTLVFieldSize_4Byte:
-        LittleEndian::Write32(p, static_cast<uint32_t>(lenOrVal));
-        break;
-    case kTLVFieldSize_8Byte:
-        LittleEndian::Write64(p, lenOrVal);
-        break;
+        writer.EndianPut(lenOrVal, lengthSize);
     }
 
-    if ((mRemainingLen >= sizeof(stagingBuf)) && (mMaxLen >= sizeof(stagingBuf)))
-    {
-        uint32_t len = static_cast<uint32_t>(p - mWritePoint);
-        mWritePoint  = p;
-        mRemainingLen -= len;
-        mLenWritten += len;
-        return CHIP_NO_ERROR;
-    }
-    return WriteData(stagingBuf, static_cast<uint32_t>(p - stagingBuf));
+    size_t written = 0;
+    VerifyOrDie(writer.Fit(written));
+    return WriteData(stagingBuf, static_cast<uint32_t>(written));
 }
 
 CHIP_ERROR TLVWriter::WriteElementWithData(TLVType type, Tag tag, const uint8_t * data, uint32_t dataLen)
 {
+    ABORT_ON_UNINITIALIZED_IF_ENABLED();
+
+    VerifyOrReturnError(IsInitialized(), CHIP_ERROR_INCORRECT_STATE);
     if (static_cast<uint64_t>(type) & kTLVTypeSizeMask)
     {
         // We won't be able to recover this type properly!
@@ -746,6 +796,9 @@ CHIP_ERROR TLVWriter::WriteElementWithData(TLVType type, Tag tag, const uint8_t 
 
 CHIP_ERROR TLVWriter::WriteData(const uint8_t * p, uint32_t len)
 {
+    ABORT_ON_UNINITIALIZED_IF_ENABLED();
+
+    VerifyOrReturnError(IsInitialized(), CHIP_ERROR_INCORRECT_STATE);
     VerifyOrReturnError((mLenWritten + len) <= mMaxLen, CHIP_ERROR_BUFFER_TOO_SMALL);
 
     while (len > 0)
@@ -758,6 +811,7 @@ CHIP_ERROR TLVWriter::WriteData(const uint8_t * p, uint32_t len)
             ReturnErrorOnFailure(mBackingStore->FinalizeBuffer(*this, mBufStart, static_cast<uint32_t>(mWritePoint - mBufStart)));
 
             ReturnErrorOnFailure(mBackingStore->GetNewBuffer(*this, mBufStart, mRemainingLen));
+            VerifyOrReturnError(mRemainingLen > 0, CHIP_ERROR_NO_MEMORY);
 
             mWritePoint = mBufStart;
 

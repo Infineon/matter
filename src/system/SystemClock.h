@@ -37,11 +37,19 @@
 #endif // CHIP_SYSTEM_CONFIG_USE_POSIX_TIME_FUNCTS || CHIP_SYSTEM_CONFIG_USE_POSIX_SOCKETS
 
 #if CHIP_SYSTEM_CONFIG_USE_ZEPHYR_SOCKETS
-#include <zephyr/net/socket.h>
+#include <inet/ZephyrSocket.h> // nogncheck
 #endif
 
 #include <chrono>
 #include <stdint.h>
+
+#if CHIP_DEVICE_LAYER_TARGET_DARWIN || CHIP_DEVICE_LAYER_TARGET_LINUX
+#define CHIP_DEVICE_LAYER_USE_ATOMICS_FOR_CLOCK 1
+#endif // CHIP_DEVICE_LAYER_TARGET_DARWIN || CHIP_DEVICE_LAYER_TARGET_LINUX
+
+#ifndef CHIP_DEVICE_LAYER_USE_ATOMICS_FOR_CLOCK
+#define CHIP_DEVICE_LAYER_USE_ATOMICS_FOR_CLOCK 0
+#endif
 
 namespace chip {
 namespace System {
@@ -149,15 +157,20 @@ public:
      *
      * Although some platforms may choose to return a value that measures the time since boot for the
      * system, applications must *not* rely on this.
+     *
+     * WARNING: *** It is up to each platform to ensure that GetMonotonicTimestamp can be
+     *              called safely in a re-entrant way from multiple contexts if making use
+     *              of this method from the application, outside the Matter stack execution
+     *              serialization context. ***
      */
-    Timestamp GetMonotonicTimestamp() { return GetMonotonicMilliseconds64(); }
+    virtual Timestamp GetMonotonicTimestamp();
 
     /**
-     * Returns a monotonic system time in units of microseconds.
+     * Returns a monotonic system time in units of microseconds, from the platform.
      *
      * This function returns an elapsed time in microseconds since an arbitrary, platform-defined epoch.
-     * The value returned is guaranteed to be ever-increasing (i.e. never wrapping or decreasing) between
-     * reboots of the system.  Additionally, the underlying time source is guaranteed to tick
+     * The value returned MUST BE guaranteed to be ever-increasing (i.e. never wrapping or decreasing) until
+     * reboot of the system.  Additionally, the underlying time source is guaranteed to tick
      * continuously during any system sleep modes that do not entail a restart upon wake.
      *
      * Although some platforms may choose to return a value that measures the time since boot for the
@@ -176,11 +189,11 @@ public:
     virtual Microseconds64 GetMonotonicMicroseconds64() = 0;
 
     /**
-     * Returns a monotonic system time in units of milliseconds.
+     * Returns a monotonic system time in units of microseconds, from the platform.
      *
      * This function returns an elapsed time in milliseconds since an arbitrary, platform-defined epoch.
-     * The value returned is guaranteed to be ever-increasing (i.e. never wrapping or decreasing) between
-     * reboots of the system.  Additionally, the underlying time source is guaranteed to tick
+     * The value returned MUST BE guaranteed to be ever-increasing (i.e. never wrapping or decreasing) until
+     * reboot of the system.  Additionally, the underlying time source is guaranteed to tick
      * continuously during any system sleep modes that do not entail a restart upon wake.
      *
      * Although some platforms may choose to return a value that measures the time since boot for the
@@ -288,6 +301,9 @@ public:
      *                                      current time.
      */
     virtual CHIP_ERROR SetClock_RealTime(Microseconds64 aNewCurTime) = 0;
+
+protected:
+    uint64_t mLastTimestamp = 0;
 };
 
 // Currently we have a single implementation class, ClockImpl, whose members are implemented in build-specific files.
@@ -301,6 +317,24 @@ public:
     CHIP_ERROR GetClock_RealTimeMS(Milliseconds64 & aCurTime) override;
     CHIP_ERROR SetClock_RealTime(Microseconds64 aNewCurTime) override;
 };
+
+/**
+ * @brief  Helper function to get current timestamp in Matter EpochS format
+ *
+ * This function is expected to return the local platform's notion of
+ * current real time, expressed as a Matter EPOCH second timestamp (seconds
+ * since 1st Jan 2000).
+ *
+ * @param  aMatterEpoch (uint32_t) reference to hold return epoch-s value
+ *
+ * @retval #CHIP_NO_ERROR     If the method succeeded.
+ * @retval #CHIP_ERROR_REAL_TIME_NOT_SYNCED
+ *                            If the platform is capable of tracking real time,
+ *                            but is currently unsynchronized.
+ * @retval #CHIP_ERROR_UNSUPPORTED_CHIP_FEATURE
+ *                            If the platform is incapable of tracking real time.
+ */
+CHIP_ERROR GetClock_MatterEpochS(uint32_t & aMatterEpoch);
 
 namespace Internal {
 
@@ -334,7 +368,14 @@ public:
         return CHIP_NO_ERROR;
     }
 
-    void SetMonotonic(Milliseconds64 timestamp) { mSystemTime = timestamp; }
+    void SetMonotonic(Milliseconds64 timestamp)
+    {
+        mSystemTime = timestamp;
+#if CHIP_DEVICE_LAYER_USE_ATOMICS_FOR_CLOCK
+        __atomic_store_n(&mLastTimestamp, timestamp.count(), __ATOMIC_SEQ_CST);
+#endif // CHIP_DEVICE_LAYER_USE_ATOMICS_FOR_CLOCK
+    }
+
     void AdvanceMonotonic(Milliseconds64 increment) { mSystemTime += increment; }
     void AdvanceRealTime(Milliseconds64 increment) { mRealTime += increment; }
 

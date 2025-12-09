@@ -110,6 +110,24 @@ DLL_EXPORT void Mutex::Lock(void)
 }
 #endif // CHIP_SYSTEM_CONFIG_FREERTOS_LOCKING
 
+#if CHIP_SYSTEM_CONFIG_THREADX_LOCKING
+DLL_EXPORT CHIP_ERROR Mutex::Init(Mutex & aThis)
+{
+    if (__sync_bool_compare_and_swap(&aThis.mInitialized, 0, 1))
+    {
+        UINT ret = tx_mutex_create(&aThis.mThreadXMutex, (CHAR*)TX_NULL, TX_INHERIT);
+        if (ret != TX_SUCCESS)
+        {
+            aThis.mInitialized = 0;
+
+            return CHIP_ERROR_INTERNAL;
+        }
+    }
+
+    return CHIP_NO_ERROR;
+}
+#endif // CHIP_SYSTEM_CONFIG_THREADX_LOCKING
+
 #if CHIP_SYSTEM_CONFIG_CMSIS_RTOS_LOCKING
 DLL_EXPORT CHIP_ERROR Mutex::Init(Mutex & aThis)
 {

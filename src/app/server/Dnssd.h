@@ -17,8 +17,14 @@
 
 #pragma once
 
+#include <app/icd/server/ICDServerConfig.h>
+#if CHIP_CONFIG_ENABLE_ICD_SERVER
+#include <app/icd/server/ICDManager.h> // nogncheck
+#endif
+#include <app/icd/server/ICDStateObserver.h>
 #include <app/server/CommissioningModeProvider.h>
 #include <credentials/FabricTable.h>
+#include <inet/InetConfig.h>
 #include <lib/core/CHIPError.h>
 #include <lib/core/Optional.h>
 #include <lib/dnssd/Advertiser.h>
@@ -29,7 +35,7 @@
 namespace chip {
 namespace app {
 
-class DLL_EXPORT DnssdServer
+class DLL_EXPORT DnssdServer : public ICDStateObserver
 {
 public:
     static constexpr System::Clock::Timestamp kTimeoutCleared = System::Clock::kZero;
@@ -41,11 +47,16 @@ public:
         return instance;
     }
 
-    /// Sets the secure Matter port
-    void SetSecuredPort(uint16_t port) { mSecuredPort = port; }
+    /// Sets the secure Matter IPv6 port
+    void SetSecuredIPv6Port(uint16_t port) { mSecuredIPv6Port = port; }
+
+#if INET_CONFIG_ENABLE_IPV4
+    /// Sets the secure Matter IPv4 port.
+    void SetSecuredIPv4Port(uint16_t port) { mSecuredIPv4Port = port; }
+#endif // INET_CONFIG_ENABLE_IPV4
 
     /// Gets the secure Matter port
-    uint16_t GetSecuredPort() const { return mSecuredPort; }
+    uint16_t GetSecuredPort() const { return mSecuredIPv6Port; }
 
     /// Sets the unsecure Matter port
     void SetUnsecuredPort(uint16_t port) { mUnsecuredPort = port; }
@@ -85,6 +96,17 @@ public:
     void OnExtendedDiscoveryExpiration(System::Layer * aSystemLayer, void * aAppState);
 #endif // CHIP_DEVICE_CONFIG_ENABLE_EXTENDED_DISCOVERY
 
+#if CHIP_CONFIG_ENABLE_ICD_SERVER
+    template <class AdvertisingParams>
+    void AddICDKeyToAdvertisement(AdvertisingParams & advParams);
+
+    void SetICDManager(ICDManager * manager) { mICDManager = manager; };
+#endif
+
+#if INET_CONFIG_ENABLE_TCP_ENDPOINT
+    void SetTCPServerEnabled(bool serverEnabled) { mTCPServerEnabled = serverEnabled; };
+#endif // INET_CONFIG_ENABLE_TCP_ENDPOINT
+
     /// Start operational advertising
     CHIP_ERROR AdvertiseOperational();
 
@@ -115,6 +137,26 @@ public:
      */
     CHIP_ERROR SetEphemeralDiscriminator(Optional<uint16_t> discriminator);
 
+    /**
+     * @brief When the ICD changes operating mode, the dnssd server needs to restart its DNS-SD advertising to update the TXT keys.
+     */
+    void OnICDModeChange() override;
+
+    /**
+     * @brief dnssd server has no action to do on this ICD event. Do nothing.
+     */
+    void OnEnterActiveMode() override{};
+
+    /**
+     * @brief dnssd server has no action to do on this ICD event. Do nothing.
+     */
+    void OnTransitionToIdle() override{};
+
+    /**
+     * @brief dnssd server has no action to do on this ICD event. Do nothing.
+     */
+    void OnEnterIdleMode() override{};
+
 private:
     /// Overloaded utility method for commissioner and commissionable advertisement
     /// This method is used for both commissioner discovery and commissionable node discovery since
@@ -129,16 +171,44 @@ private:
     /// Set MDNS commissionable node advertisement
     CHIP_ERROR AdvertiseCommissionableNode(chip::Dnssd::CommissioningMode mode);
 
+    // Our randomly-generated fallback "MAC address", in case we don't have a real one.
+    uint8_t mFallbackMAC[chip::DeviceLayer::ConfigurationManager::kPrimaryMACAddressLength] = { 0 };
+
+    void GetPrimaryOrFallbackMACAddress(MutableByteSpan & mac);
+
     //
     // Check if we have any valid operational credentials present in the fabric table and return true
     // if we do.
     //
     bool HaveOperationalCredentials();
 
+    // Check whether the secured IPv4 port matches the secured IPv6 port.  If it
+    // does not, we should not advertise our IPv4 bits, because we can only
+    // advertise one port number.
+    bool SecuredIPv4PortMatchesIPv6Port() const
+    {
+#if INET_CONFIG_ENABLE_IPV4
+        return mSecuredIPv4Port == mSecuredIPv6Port;
+#else
+        return false;
+#endif // INET_CONFIG_ENABLE_IPV4
+    }
+
     FabricTable * mFabricTable                             = nullptr;
     CommissioningModeProvider * mCommissioningModeProvider = nullptr;
 
-    uint16_t mSecuredPort          = CHIP_PORT;
+#if CHIP_CONFIG_ENABLE_ICD_SERVER
+    ICDManager * mICDManager = nullptr;
+#endif // CHIP_CONFIG_ENABLE_ICD_SERVER
+
+#if INET_CONFIG_ENABLE_TCP_ENDPOINT
+    bool mTCPServerEnabled = true;
+#endif // INET_CONFIG_ENABLE_TCP_ENDPOINT
+
+    uint16_t mSecuredIPv6Port = CHIP_PORT;
+#if INET_CONFIG_ENABLE_IPV4
+    uint16_t mSecuredIPv4Port = CHIP_PORT;
+#endif // INET_CONFIG_ENABLE_IPV4
     uint16_t mUnsecuredPort        = CHIP_UDC_PORT;
     Inet::InterfaceId mInterfaceId = Inet::InterfaceId::Null();
 

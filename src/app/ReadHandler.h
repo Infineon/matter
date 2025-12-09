@@ -25,9 +25,9 @@
 #pragma once
 
 #include <access/AccessControl.h>
-#include <app/AttributeAccessInterface.h>
 #include <app/AttributePathExpandIterator.h>
 #include <app/AttributePathParams.h>
+#include <app/AttributeValueEncoder.h>
 #include <app/CASESessionManager.h>
 #include <app/DataVersionFilter.h>
 #include <app/EventManagement.h>
@@ -36,14 +36,15 @@
 #include <app/MessageDef/DataVersionFilterIBs.h>
 #include <app/MessageDef/EventFilterIBs.h>
 #include <app/MessageDef/EventPathIBs.h>
-#include <app/ObjectList.h>
 #include <app/OperationalSessionSetup.h>
+#include <app/SubscriptionResumptionSessionEstablisher.h>
 #include <app/SubscriptionResumptionStorage.h>
 #include <lib/core/CHIPCallback.h>
 #include <lib/core/CHIPCore.h>
 #include <lib/core/TLVDebug.h>
 #include <lib/support/CodeUtils.h>
 #include <lib/support/DLLUtil.h>
+#include <lib/support/LinkedList.h>
 #include <lib/support/logging/CHIPLogging.h>
 #include <messaging/ExchangeHolder.h>
 #include <messaging/ExchangeMgr.h>
@@ -69,6 +70,7 @@ class TestReportScheduler;
 } // namespace reporting
 
 class InteractionModelEngine;
+class TestInteractionModelEngine;
 
 /**
  *  @class ReadHandler
@@ -152,6 +154,11 @@ public:
          * issues w.r.t the ReadHandler itself.
          */
         virtual ApplicationCallback * GetAppCallback() = 0;
+
+        /*
+         * Retrieve the InteractionalModelEngine that holds this ReadHandler.
+         */
+        virtual InteractionModelEngine * GetInteractionModelEngine() = 0;
     };
 
     // TODO (#27675) : Merge existing callback and observer into one class and have an observer pool in the Readhandler to notify
@@ -218,15 +225,34 @@ public:
     ReadHandler(ManagementCallback & apCallback, Observer * observer);
 #endif
 
-    const ObjectList<AttributePathParams> * GetAttributePathList() const { return mpAttributePathList; }
-    const ObjectList<EventPathParams> * GetEventPathList() const { return mpEventPathList; }
-    const ObjectList<DataVersionFilter> * GetDataVersionFilterList() const { return mpDataVersionFilterList; }
+    const SingleLinkedListNode<AttributePathParams> * GetAttributePathList() const { return mpAttributePathList; }
+    const SingleLinkedListNode<EventPathParams> * GetEventPathList() const { return mpEventPathList; }
+    const SingleLinkedListNode<DataVersionFilter> * GetDataVersionFilterList() const { return mpDataVersionFilterList; }
 
+    /**
+     * @brief Returns the reporting intervals that will used by the ReadHandler for the subscription being requested.
+     *        After the subscription is established, these will be the set reporting intervals and cannot be changed.
+     *
+     * @param[out] aMinInterval minimum time delta between two reports for the subscription
+     * @param[in] aMaxInterval maximum time delta between two reports for the subscription
+     */
     void GetReportingIntervals(uint16_t & aMinInterval, uint16_t & aMaxInterval) const
     {
         aMinInterval = mMinIntervalFloorSeconds;
         aMaxInterval = mMaxInterval;
     }
+
+    /**
+     * @brief Returns the maximum reporting interval that was initially requested by the subscriber
+     *        This is the same value as the mMaxInterval member if the max interval is not changed by the publisher.
+     *
+     * @note If the device is an ICD, the MaxInterval of a subscription is automatically set to a multiple of the IdleModeDuration.
+     *       This function is the only way to get the requested max interval once the OnSubscriptionRequested application callback
+     *       is called.
+     *
+     * @return uint16_t subscriber requested maximum reporting interval
+     */
+    inline uint16_t GetSubscriberRequestedMaxInterval() const { return mSubscriberRequestedMaxInterval; }
 
     CHIP_ERROR SetMinReportingIntervalForTests(uint16_t aMinInterval)
     {
@@ -247,11 +273,21 @@ public:
     {
         VerifyOrReturnError(IsIdle(), CHIP_ERROR_INCORRECT_STATE);
         VerifyOrReturnError(mMinIntervalFloorSeconds <= aMaxInterval, CHIP_ERROR_INVALID_ARGUMENT);
-        VerifyOrReturnError(aMaxInterval <= std::max(GetPublisherSelectedIntervalLimit(), mMaxInterval),
+        VerifyOrReturnError(aMaxInterval <= std::max(GetPublisherSelectedIntervalLimit(), mSubscriberRequestedMaxInterval),
                             CHIP_ERROR_INVALID_ARGUMENT);
         mMaxInterval = aMaxInterval;
         return CHIP_NO_ERROR;
     }
+
+#if CHIP_CONFIG_PERSIST_SUBSCRIPTIONS
+    /**
+     *
+     *  @brief Initialize a ReadHandler for a resumed subsciption
+     *
+     *  Used after the SubscriptionResumptionSessionEstablisher establishs the CASE session
+     */
+    void OnSubscriptionResumed(const SessionHandle & sessionHandle, SubscriptionResumptionSessionEstablisher & sessionEstablisher);
+#endif
 
 private:
     PriorityLevel GetCurrentPriority() const { return mCurrentPriority; }
@@ -259,7 +295,7 @@ private:
 
     /**
      * Returns SUBSCRIPTION_MAX_INTERVAL_PUBLISHER_LIMIT
-     * For an ICD publisher, this SHALL be set to the idle mode interval.
+     * For an ICD publisher, this SHALL be set to the idle mode duration.
      * Otherwise, this SHALL be set to 60 minutes.
      */
     uint16_t GetPublisherSelectedIntervalLimit();
@@ -302,18 +338,6 @@ private:
      */
     void OnInitialRequest(System::PacketBufferHandle && aPayload);
 
-#if CHIP_CONFIG_PERSIST_SUBSCRIPTIONS
-    /**
-     *
-     *  @brief Resume a persisted subscription
-     *
-     *  Used after ReadHandler(ManagementCallback & apCallback). This will start a CASE session
-     *  with the subscriber if one doesn't already exist, and send full priming report when connected.
-     */
-    void ResumeSubscription(CASESessionManager & caseSessionManager,
-                            SubscriptionResumptionStorage::SubscriptionInfo & subscriptionInfo);
-#endif
-
     /**
      *  Send ReportData to initiator
      *
@@ -327,6 +351,15 @@ private:
      *  a state where it's waiting for a response.
      */
     CHIP_ERROR SendReportData(System::PacketBufferHandle && aPayload, bool aMoreChunks);
+
+    /*
+     * Get the appropriate size of a packet buffer to allocate for encoding a Report message.
+     * This size might depend on the underlying session used by the ReadHandler.
+     *
+     * The size returned here is the size not including the various prepended headers
+     * (what System::PacketBuffer calls the "available size").
+     */
+    size_t GetReportBufferMaxSize();
 
     /**
      *  Returns whether this ReadHandler represents a subscription that was created by the other side of the provided exchange.
@@ -374,12 +407,12 @@ private:
     bool IsFabricFiltered() const { return mFlags.Has(ReadHandlerFlags::FabricFiltered); }
     CHIP_ERROR OnSubscribeRequest(Messaging::ExchangeContext * apExchangeContext, System::PacketBufferHandle && aPayload);
     void GetSubscriptionId(SubscriptionId & aSubscriptionId) const { aSubscriptionId = mSubscriptionId; }
-    AttributePathExpandIterator * GetAttributePathExpandIterator() { return &mAttributePathExpandIterator; }
+    AttributePathExpandIterator::Position & AttributeIterationPosition() { return mAttributePathExpandPosition; }
 
     /// @brief Notifies the read handler that a set of attribute paths has been marked dirty. This will schedule a reporting engine
     /// run if the change to the attribute path makes the ReadHandler reportable.
     /// @param aAttributeChanged Path to the attribute that was changed.
-    void AttributePathIsDirty(const AttributePathParams & aAttributeChanged);
+    void AttributePathIsDirty(DataModel::Provider * apDataModel, const AttributePathParams & aAttributeChanged);
     bool IsDirty() const
     {
         return (mDirtyGeneration > mPreviousReportsBeginGeneration) || mFlags.Has(ReadHandlerFlags::ForceDirty);
@@ -407,8 +440,8 @@ private:
     /// or after the min interval is reached if it has not yet been reached.
     void ForceDirtyState();
 
-    const AttributeValueEncoder::AttributeEncodeState & GetAttributeEncodeState() const { return mAttributeEncoderState; }
-    void SetAttributeEncodeState(const AttributeValueEncoder::AttributeEncodeState & aState) { mAttributeEncoderState = aState; }
+    const AttributeEncodeState & GetAttributeEncodeState() const { return mAttributeEncoderState; }
+    void SetAttributeEncodeState(const AttributeEncodeState & aState) { mAttributeEncoderState = aState; }
     uint32_t GetLastWrittenEventsBytes() const { return mLastWrittenEventsBytes; }
 
     // Returns the number of interested paths, including wildcard and concrete paths.
@@ -429,6 +462,7 @@ private:
     //
     friend class chip::app::reporting::Engine;
     friend class chip::app::InteractionModelEngine;
+    friend class TestInteractionModelEngine;
 
     // The report scheduler needs to be able to access StateFlag private functions ShouldStartReporting(), CanStartReporting(),
     // ForceDirtyState() and IsDirty() to know when to schedule a run so it is declared as a friend class.
@@ -485,12 +519,7 @@ private:
     /// @param aFlag Flag to clear
     void ClearStateFlag(ReadHandlerFlags aFlag);
 
-    // Helpers for continuing the subscription resumption
-    static void HandleDeviceConnected(void * context, Messaging::ExchangeManager & exchangeMgr,
-                                      const SessionHandle & sessionHandle);
-    static void HandleDeviceConnectionFailure(void * context, const ScopedNodeId & peerId, CHIP_ERROR error);
-
-    AttributePathExpandIterator mAttributePathExpandIterator = AttributePathExpandIterator(nullptr);
+    SubscriptionId mSubscriptionId = 0;
 
     // The current generation of the reporting engine dirty set the last time we were notified that a path we're interested in was
     // marked dirty.
@@ -532,17 +561,13 @@ private:
     // engine, the "oldest" subscription is the subscription with the smallest generation.
     uint64_t mTransactionStartGeneration = 0;
 
-    SubscriptionId mSubscriptionId    = 0;
-    uint16_t mMinIntervalFloorSeconds = 0;
-    uint16_t mMaxInterval             = 0;
-
     EventNumber mEventMin = 0;
 
     // The last schedule event number snapshoted in the beginning when preparing to fill new events to reports
     EventNumber mLastScheduledEventNumber = 0;
 
-    // TODO: We should shutdown the transaction when the session expires.
-    SessionHolder mSessionHandle;
+    /// Iterator position state for any ongoing path expansion for handling wildcard reads/subscriptions.
+    AttributePathExpandIterator::Position mAttributePathExpandPosition;
 
     Messaging::ExchangeHolder mExchangeCtx;
 #if CHIP_CONFIG_UNSAFE_SUBSCRIPTION_EXCHANGE_MANAGER_USE
@@ -551,17 +576,24 @@ private:
     Messaging::ExchangeManager * mExchangeMgr = nullptr;
 #endif // CHIP_CONFIG_UNSAFE_SUBSCRIPTION_EXCHANGE_MANAGER_USE
 
-    ObjectList<AttributePathParams> * mpAttributePathList   = nullptr;
-    ObjectList<EventPathParams> * mpEventPathList           = nullptr;
-    ObjectList<DataVersionFilter> * mpDataVersionFilterList = nullptr;
+    SingleLinkedListNode<AttributePathParams> * mpAttributePathList   = nullptr;
+    SingleLinkedListNode<EventPathParams> * mpEventPathList           = nullptr;
+    SingleLinkedListNode<DataVersionFilter> * mpDataVersionFilterList = nullptr;
 
     ManagementCallback & mManagementCallback;
+
+    // TODO (#27675): Merge all observers into one and that one will dispatch the callbacks to the right place.
+    Observer * mObserver = nullptr;
 
     uint32_t mLastWrittenEventsBytes = 0;
 
     // The detailed encoding state for a single attribute, used by list chunking feature.
     // The size of AttributeEncoderState is 2 bytes for now.
-    AttributeValueEncoder::AttributeEncodeState mAttributeEncoderState;
+    AttributeEncodeState mAttributeEncoderState;
+
+    uint16_t mMinIntervalFloorSeconds        = 0;
+    uint16_t mMaxInterval                    = 0;
+    uint16_t mSubscriberRequestedMaxInterval = 0;
 
     // Current Handler state
     HandlerState mState            = HandlerState::Idle;
@@ -569,14 +601,8 @@ private:
     BitFlags<ReadHandlerFlags> mFlags;
     InteractionType mInteractionType = InteractionType::Read;
 
-    // TODO (#27675): Merge all observers into one and that one will dispatch the callbacks to the right place.
-    Observer * mObserver = nullptr;
-
-#if CHIP_CONFIG_PERSIST_SUBSCRIPTIONS
-    // Callbacks to handle server-initiated session success/failure
-    chip::Callback::Callback<OnDeviceConnected> mOnConnectedCallback;
-    chip::Callback::Callback<OnDeviceConnectionFailure> mOnConnectionFailureCallback;
-#endif
+    SessionHolder mSessionHandle;
 };
+
 } // namespace app
 } // namespace chip

@@ -32,7 +32,7 @@
 #include <inet/InetError.h>
 #include <lib/support/DLLUtil.h>
 
-#if CHIP_SYSTEM_CONFIG_USE_LWIP && !CHIP_SYSTEM_CONFIG_USE_OPEN_THREAD_ENDPOINT
+#if CHIP_SYSTEM_CONFIG_USE_LWIP && !CHIP_SYSTEM_CONFIG_USE_OPENTHREAD_ENDPOINT
 #include <lwip/netif.h>
 #endif // CHIP_SYSTEM_CONFIG_USE_LWIP
 
@@ -49,9 +49,10 @@ struct net_if_ipv4;
 struct net_if_ipv6;
 #endif // CHIP_SYSTEM_CONFIG_USE_ZEPHYR_NET_IF
 
-#if CHIP_SYSTEM_CONFIG_USE_OPEN_THREAD_ENDPOINT
-struct otIp6AddressInfo;
-#endif
+#if CHIP_SYSTEM_CONFIG_USE_NETXDUO
+#include <nx_api.h>
+#include <nx_ip.h>
+#endif // CHIP_SYSTEM_CONFIG_USE_NETXDUO
 
 #include <stddef.h>
 #include <stdint.h>
@@ -80,12 +81,12 @@ enum class InterfaceType
 class InterfaceId
 {
 public:
-#if CHIP_SYSTEM_CONFIG_USE_LWIP && !CHIP_SYSTEM_CONFIG_USE_OPEN_THREAD_ENDPOINT && !CHIP_SYSTEM_CONFIG_USE_OPEN_THREAD_ENDPOINT
+#if CHIP_SYSTEM_CONFIG_USE_LWIP && !CHIP_SYSTEM_CONFIG_USE_OPENTHREAD_ENDPOINT && !CHIP_SYSTEM_CONFIG_USE_OPENTHREAD_ENDPOINT
     using PlatformType                       = struct netif *;
     static constexpr size_t kMaxIfNameLength = 13; // Names are formatted as %c%c%d
 #endif                                             // CHIP_SYSTEM_CONFIG_USE_LWIP
 
-#if CHIP_SYSTEM_CONFIG_USE_SOCKETS && CHIP_SYSTEM_CONFIG_USE_BSD_IFADDRS
+#if (CHIP_SYSTEM_CONFIG_USE_SOCKETS || CHIP_SYSTEM_CONFIG_USE_NETWORK_FRAMEWORK) && CHIP_SYSTEM_CONFIG_USE_BSD_IFADDRS
     using PlatformType                       = unsigned int;
     static constexpr size_t kMaxIfNameLength = IF_NAMESIZE;
 #endif // CHIP_SYSTEM_CONFIG_USE_BSD_IFADDRS
@@ -95,10 +96,15 @@ public:
     static constexpr size_t kMaxIfNameLength = Z_DEVICE_MAX_NAME_LEN;
 #endif
 
-#if CHIP_SYSTEM_CONFIG_USE_OPEN_THREAD_ENDPOINT
+#if CHIP_SYSTEM_CONFIG_USE_OPENTHREAD_ENDPOINT
     using PlatformType                       = unsigned int;
     static constexpr size_t kMaxIfNameLength = 6;
 #endif
+
+#if CHIP_SYSTEM_CONFIG_USE_NETXDUO
+    using PlatformType                       = unsigned int;
+    static constexpr size_t kMaxIfNameLength = 20; // Names can be any length. Use the first 20 characters.
+#endif // CHIP_SYSTEM_CONFIG_USE_NETXDUO
 
     ~InterfaceId() = default;
 
@@ -126,6 +132,13 @@ public:
      * Get the underlying platform representation of the interface.
      */
     PlatformType GetPlatformInterface() const { return mPlatformInterface; }
+
+#if CHIP_SYSTEM_CONFIG_USE_NETXDUO
+    /**
+     * Get the NetXDuo IP instance for the interface.
+     */
+    CHIP_ERROR GetNetXDuoInterfaceIP(NX_IP * & nx_ip, NX_INTERFACE * & nx_interface);
+#endif // CHIP_SYSTEM_CONFIG_USE_NETXDUO
 
     /**
      * Get the name of the network interface
@@ -193,7 +206,7 @@ public:
     CHIP_ERROR GetLinkLocalAddr(IPAddress * llAddr) const;
 
 private:
-#if CHIP_SYSTEM_CONFIG_USE_LWIP && !CHIP_SYSTEM_CONFIG_USE_OPEN_THREAD_ENDPOINT
+#if CHIP_SYSTEM_CONFIG_USE_LWIP && !CHIP_SYSTEM_CONFIG_USE_OPENTHREAD_ENDPOINT
     static constexpr PlatformType kPlatformNull = nullptr;
 #endif // CHIP_SYSTEM_CONFIG_USE_LWIP
 
@@ -205,9 +218,13 @@ private:
     static constexpr PlatformType kPlatformNull = 0;
 #endif
 
-#if CHIP_SYSTEM_CONFIG_USE_OPEN_THREAD_ENDPOINT
+#if CHIP_SYSTEM_CONFIG_USE_OPENTHREAD_ENDPOINT
     static constexpr PlatformType kPlatformNull = 0;
 #endif
+
+#if CHIP_SYSTEM_CONFIG_USE_NETXDUO
+    static constexpr PlatformType kPlatformNull = 0;
+#endif // CHIP_SYSTEM_CONFIG_USE_NETXDUO
 
     PlatformType mPlatformInterface;
 };
@@ -351,7 +368,7 @@ public:
     CHIP_ERROR GetHardwareAddress(uint8_t * addressBuffer, uint8_t & addressSize, uint8_t addressBufferSize);
 
 protected:
-#if CHIP_SYSTEM_CONFIG_USE_LWIP && !CHIP_SYSTEM_CONFIG_USE_OPEN_THREAD_ENDPOINT
+#if CHIP_SYSTEM_CONFIG_USE_LWIP && !CHIP_SYSTEM_CONFIG_USE_OPENTHREAD_ENDPOINT
     struct netif * mCurNetif;
 #endif // CHIP_SYSTEM_CONFIG_USE_LWIP
 
@@ -368,9 +385,13 @@ protected:
     InterfaceId::PlatformType mCurrentId = 1;
     net_if * mCurrentInterface           = nullptr;
 #endif // CHIP_SYSTEM_CONFIG_USE_ZEPHYR_NET_IF
-#if CHIP_SYSTEM_CONFIG_USE_OPEN_THREAD_ENDPOINT
-    struct otIp6AddressInfo * mCurNetif;
-#endif
+#if CHIP_SYSTEM_CONFIG_USE_OPENTHREAD_ENDPOINT
+    bool mHasCurrent = true;
+#endif // CHIP_SYSTEM_CONFIG_USE_OPENTHREAD_ENDPOINT
+#if CHIP_SYSTEM_CONFIG_USE_NETXDUO
+    InterfaceId::PlatformType mCurrentId = 1;
+    NX_IP * mCurrentInterface            = nullptr;
+#endif // CHIP_SYSTEM_CONFIG_USE_NETXDUO
 };
 
 /**
@@ -537,7 +558,7 @@ public:
     bool HasBroadcastAddress();
 
 private:
-#if CHIP_SYSTEM_CONFIG_USE_LWIP && !CHIP_SYSTEM_CONFIG_USE_OPEN_THREAD_ENDPOINT
+#if CHIP_SYSTEM_CONFIG_USE_LWIP && !CHIP_SYSTEM_CONFIG_USE_OPENTHREAD_ENDPOINT
     enum
     {
         kBeforeStartIndex = -1
@@ -557,23 +578,29 @@ private:
     net_if_ipv6 * mIpv6 = nullptr;
     int mCurAddrIndex   = -1;
 #endif // CHIP_SYSTEM_CONFIG_USE_ZEPHYR_NET_IF
-#if CHIP_SYSTEM_CONFIG_USE_OPEN_THREAD_ENDPOINT
+#if CHIP_SYSTEM_CONFIG_USE_OPENTHREAD_ENDPOINT
     const otNetifAddress * mNetifAddrList;
     const otNetifAddress * mCurAddr;
-#endif // #if CHIP_SYSTEM_CONFIG_USE_OPEN_THREAD_ENDPOINT
+#endif // #if CHIP_SYSTEM_CONFIG_USE_OPENTHREAD_ENDPOINT
+
+#if CHIP_SYSTEM_CONFIG_USE_NETXDUO
+    InterfaceIterator mIntfIter;
+    NX_INTERFACE * mInterface;
+    int mCurAddrIndex = -1;
+#endif // CHIP_SYSTEM_CONFIG_USE_NETXDUO
 };
 
-#if CHIP_SYSTEM_CONFIG_USE_OPEN_THREAD_ENDPOINT
+#if CHIP_SYSTEM_CONFIG_USE_OPENTHREAD_ENDPOINT
 inline InterfaceIterator::InterfaceIterator(void) {}
 inline InterfaceIterator::~InterfaceIterator()               = default;
 inline InterfaceAddressIterator::~InterfaceAddressIterator() = default;
 inline bool InterfaceIterator::HasCurrent(void)
 {
-    return mCurNetif != NULL;
+    return mHasCurrent;
 }
 #endif
 
-#if CHIP_SYSTEM_CONFIG_USE_LWIP && !CHIP_SYSTEM_CONFIG_USE_OPEN_THREAD_ENDPOINT
+#if CHIP_SYSTEM_CONFIG_USE_LWIP && !CHIP_SYSTEM_CONFIG_USE_OPENTHREAD_ENDPOINT
 
 inline InterfaceIterator::InterfaceIterator(void)
 {
@@ -605,6 +632,11 @@ inline InterfaceAddressIterator::~InterfaceAddressIterator(void) {}
 inline InterfaceIterator::~InterfaceIterator()               = default;
 inline InterfaceAddressIterator::~InterfaceAddressIterator() = default;
 #endif // CHIP_SYSTEM_CONFIG_USE_ZEPHYR_NET_IF
+
+#if CHIP_SYSTEM_CONFIG_USE_NETXDUO
+inline InterfaceIterator::~InterfaceIterator()               = default;
+inline InterfaceAddressIterator::~InterfaceAddressIterator() = default;
+#endif // CHIP_SYSTEM_CONFIG_USE_NETXDUO
 
 } // namespace Inet
 } // namespace chip

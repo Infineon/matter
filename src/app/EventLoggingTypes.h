@@ -19,11 +19,11 @@
 
 #include <access/SubjectDescriptor.h>
 #include <app/EventPathParams.h>
-#include <app/ObjectList.h>
 #include <app/util/basic-types.h>
 #include <lib/core/CHIPCore.h>
 #include <lib/core/Optional.h>
 #include <lib/core/TLV.h>
+#include <lib/support/LinkedList.h>
 #include <system/SystemPacketBuffer.h>
 
 inline constexpr size_t kNumPriorityLevel = 3;
@@ -100,7 +100,7 @@ struct Timestamp
         kSystem = 0,
         kEpoch
     };
-    Timestamp() {}
+    constexpr Timestamp() = default;
     Timestamp(Type aType, uint64_t aValue) : mType(aType), mValue(aValue) {}
     Timestamp(System::Clock::Timestamp aValue) : mType(Type::kSystem), mValue(aValue.count()) {}
     static Timestamp Epoch(System::Clock::Timestamp aValue)
@@ -128,9 +128,7 @@ class EventOptions
 {
 public:
     EventOptions() : mPriority(PriorityLevel::Invalid) {}
-    EventOptions(Timestamp aTimestamp) : mTimestamp(aTimestamp), mPriority(PriorityLevel::Invalid) {}
     ConcreteEventPath mPath;
-    Timestamp mTimestamp;
     PriorityLevel mPriority = PriorityLevel::Invalid;
     // kUndefinedFabricIndex 0 means not fabric associated at all
     FabricIndex mFabricIndex = kUndefinedFabricIndex;
@@ -151,10 +149,10 @@ struct EventLoadOutContext
     EventNumber mStartingEventNumber = 0;
     Timestamp mPreviousTime;
     Timestamp mCurrentTime;
-    EventNumber mCurrentEventNumber                            = 0;
-    size_t mEventCount                                         = 0;
-    const ObjectList<EventPathParams> * mpInterestedEventPaths = nullptr;
-    bool mFirst                                                = true;
+    EventNumber mCurrentEventNumber                                      = 0;
+    size_t mEventCount                                                   = 0;
+    const SingleLinkedListNode<EventPathParams> * mpInterestedEventPaths = nullptr;
+    bool mFirst                                                          = true;
     Access::SubjectDescriptor mSubjectDescriptor;
 };
 } // namespace app

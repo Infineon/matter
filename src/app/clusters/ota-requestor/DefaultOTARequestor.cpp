@@ -410,14 +410,13 @@ void DefaultOTARequestor::CancelImageUpdate()
 
 CHIP_ERROR DefaultOTARequestor::GetUpdateStateProgressAttribute(EndpointId endpointId, app::DataModel::Nullable<uint8_t> & progress)
 {
-    VerifyOrReturnError(OtaRequestorServerGetUpdateStateProgress(endpointId, progress) == EMBER_ZCL_STATUS_SUCCESS,
-                        CHIP_ERROR_BAD_REQUEST);
+    VerifyOrReturnError(OtaRequestorServerGetUpdateStateProgress(endpointId, progress) == Status::Success, CHIP_ERROR_BAD_REQUEST);
     return CHIP_NO_ERROR;
 }
 
 CHIP_ERROR DefaultOTARequestor::GetUpdateStateAttribute(EndpointId endpointId, OTAUpdateStateEnum & state)
 {
-    VerifyOrReturnError(OtaRequestorServerGetUpdateState(endpointId, state) == EMBER_ZCL_STATUS_SUCCESS, CHIP_ERROR_BAD_REQUEST);
+    VerifyOrReturnError(OtaRequestorServerGetUpdateState(endpointId, state) == Status::Success, CHIP_ERROR_BAD_REQUEST);
     return CHIP_NO_ERROR;
 }
 
@@ -555,6 +554,8 @@ CHIP_ERROR DefaultOTARequestor::TriggerImmediateQuery(FabricIndex fabricIndex)
 void DefaultOTARequestor::DownloadUpdate()
 {
     RecordNewUpdateState(OTAUpdateStateEnum::kDownloading, OTAChangeReasonEnum::kSuccess);
+    // If image is successfully downloaded and applied, the device will reboot so persist all relevant data
+    StoreCurrentUpdateInfo();
     ConnectToProvider(kDownload);
 }
 
@@ -566,9 +567,6 @@ void DefaultOTARequestor::DownloadUpdateDelayedOnUserConsent()
 void DefaultOTARequestor::ApplyUpdate()
 {
     RecordNewUpdateState(OTAUpdateStateEnum::kApplying, OTAChangeReasonEnum::kSuccess);
-
-    // If image is successfully applied, the device will reboot so persist all relevant data
-    StoreCurrentUpdateInfo();
 
     ConnectToProvider(kApplyUpdate);
 }
@@ -594,7 +592,7 @@ CHIP_ERROR DefaultOTARequestor::ClearDefaultOtaProviderList(FabricIndex fabricIn
     CHIP_ERROR error = mDefaultOtaProviderList.Delete(fabricIndex);
 
     // Ignore the error if no entry for the associated fabric index has been found.
-    ReturnErrorCodeIf(error == CHIP_ERROR_NOT_FOUND, CHIP_NO_ERROR);
+    VerifyOrReturnError(error != CHIP_ERROR_NOT_FOUND, CHIP_NO_ERROR);
     ReturnErrorOnFailure(error);
 
     return mStorage->StoreDefaultProviders(mDefaultOtaProviderList);
@@ -761,7 +759,7 @@ CHIP_ERROR DefaultOTARequestor::SendQueryImageRequest(Messaging::ExchangeManager
     else
     {
         // Country code unavailable or invalid, use default
-        args.location.SetValue(CharSpan("XX", strlen("XX")));
+        args.location.SetValue(CharSpan::fromCharString("XX"));
     }
 
     args.metadataForProvider = mMetadataForProvider;

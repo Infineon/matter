@@ -23,10 +23,6 @@
  *
  */
 
-#ifndef __STDC_LIMIT_MACROS
-#define __STDC_LIMIT_MACROS
-#endif
-
 #include <inet/InetInterface.h>
 
 #include <inet/IPPrefix.h>
@@ -36,13 +32,13 @@
 #include <lib/support/DLLUtil.h>
 #include <lib/support/SafeInt.h>
 
-#if CHIP_SYSTEM_CONFIG_USE_LWIP && !CHIP_SYSTEM_CONFIG_USE_OPEN_THREAD_ENDPOINT
+#if CHIP_SYSTEM_CONFIG_USE_LWIP && !CHIP_SYSTEM_CONFIG_USE_OPENTHREAD_ENDPOINT
 #include <lwip/netif.h>
 #include <lwip/sys.h>
 #include <lwip/tcpip.h>
 #endif // CHIP_SYSTEM_CONFIG_USE_LWIP
 
-#if CHIP_SYSTEM_CONFIG_USE_SOCKETS && CHIP_SYSTEM_CONFIG_USE_BSD_IFADDRS
+#if (CHIP_SYSTEM_CONFIG_USE_SOCKETS || CHIP_SYSTEM_CONFIG_USE_NETWORK_FRAMEWORK) && CHIP_SYSTEM_CONFIG_USE_BSD_IFADDRS
 #include <errno.h>
 #include <fcntl.h>
 #include <sys/socket.h>
@@ -54,14 +50,22 @@
 #include <ifaddrs.h>
 #include <net/if.h>
 #include <sys/ioctl.h>
-#endif // CHIP_SYSTEM_CONFIG_USE_SOCKETS && CHIP_SYSTEM_CONFIG_USE_BSD_IFADDRS
+#endif // (CHIP_SYSTEM_CONFIG_USE_SOCKETS || CHIP_SYSTEM_CONFIG_USE_NETWORK_FRAMEWORK) && CHIP_SYSTEM_CONFIG_USE_BSD_IFADDRS
 
 #if CHIP_SYSTEM_CONFIG_USE_ZEPHYR_NET_IF
 #include <zephyr/net/net_if.h>
 #endif // CHIP_SYSTEM_CONFIG_USE_ZEPHYR_NET_IF
 
-#if CHIP_SYSTEM_CONFIG_USE_OPEN_THREAD_ENDPOINT
+#if CHIP_SYSTEM_CONFIG_USE_OPENTHREAD_ENDPOINT
 #include <inet/UDPEndPointImplOpenThread.h>
+#endif
+
+#if CHIP_SYSTEM_CONFIG_USE_NETXDUO
+#include <nx_api.h>
+extern   "C" {
+#include <nx_ip.h>
+#include <nx_ipv6.h>
+}
 #endif
 
 #include <stdio.h>
@@ -70,7 +74,7 @@
 namespace chip {
 namespace Inet {
 
-#if CHIP_SYSTEM_CONFIG_USE_OPEN_THREAD_ENDPOINT
+#if CHIP_SYSTEM_CONFIG_USE_OPENTHREAD_ENDPOINT
 CHIP_ERROR InterfaceId::GetInterfaceName(char * nameBuf, size_t nameBufSize) const
 {
     if (mPlatformInterface && nameBufSize >= kMaxIfNameLength)
@@ -110,7 +114,25 @@ CHIP_ERROR InterfaceId::InterfaceNameToId(const char * intfName, InterfaceId & i
 bool InterfaceIterator::Next()
 {
     // TODO : Cleanup #17346
+    mHasCurrent = false;
     return false;
+}
+
+CHIP_ERROR InterfaceIterator::GetInterfaceName(char * nameBuf, size_t nameBufSize)
+{
+    VerifyOrReturnError(HasCurrent(), CHIP_ERROR_INCORRECT_STATE);
+    return InterfaceId(1).GetInterfaceName(nameBuf, nameBufSize);
+}
+
+InterfaceId InterfaceIterator::GetInterfaceId()
+{
+    // only 1 interface is supported
+    return HasCurrent() ? InterfaceId(1) : InterfaceId::Null();
+}
+
+bool InterfaceIterator::IsUp()
+{
+    return HasCurrent() && (otThreadGetDeviceRole(Inet::globalOtInstance) != OT_DEVICE_ROLE_DISABLED);
 }
 
 InterfaceAddressIterator::InterfaceAddressIterator()
@@ -128,6 +150,8 @@ bool InterfaceAddressIterator::Next()
 {
     if (mNetifAddrList == nullptr)
     {
+        if (Inet::globalOtInstance == nullptr)
+            return false;
         mNetifAddrList = otIp6GetUnicastAddresses(Inet::globalOtInstance);
         mCurAddr       = mNetifAddrList;
     }
@@ -155,9 +179,44 @@ uint8_t InterfaceAddressIterator::GetPrefixLength()
     return 64;
 }
 
+bool InterfaceAddressIterator::IsUp()
+{
+    return HasCurrent() && (otThreadGetDeviceRole(Inet::globalOtInstance) != OT_DEVICE_ROLE_DISABLED);
+}
+
+InterfaceId InterfaceAddressIterator::GetInterfaceId()
+{
+    // only 1 interface is supported
+    return HasCurrent() ? InterfaceId(1) : InterfaceId::Null();
+}
+
+bool InterfaceAddressIterator::HasBroadcastAddress()
+{
+    return HasCurrent() && (otIp6GetMulticastAddresses(Inet::globalOtInstance) != nullptr);
+}
+
+CHIP_ERROR InterfaceIterator::GetInterfaceType(InterfaceType & type)
+{
+    type = InterfaceType::Thread;
+
+    return CHIP_NO_ERROR;
+}
+
+CHIP_ERROR InterfaceIterator::GetHardwareAddress(uint8_t * addressBuffer, uint8_t & addressSize, uint8_t addressBufferSize)
+{
+    VerifyOrReturnError(addressBuffer != nullptr, CHIP_ERROR_INVALID_ARGUMENT);
+    VerifyOrReturnError(addressBufferSize >= sizeof(otExtAddress), CHIP_ERROR_BUFFER_TOO_SMALL);
+
+    const otExtAddress * extendedAddr = otLinkGetExtendedAddress(Inet::globalOtInstance);
+    memcpy(addressBuffer, extendedAddr, sizeof(otExtAddress));
+    addressSize = sizeof(otExtAddress);
+
+    return CHIP_NO_ERROR;
+}
+
 #endif
 
-#if CHIP_SYSTEM_CONFIG_USE_LWIP && !CHIP_SYSTEM_CONFIG_USE_OPEN_THREAD_ENDPOINT
+#if CHIP_SYSTEM_CONFIG_USE_LWIP && !CHIP_SYSTEM_CONFIG_USE_OPENTHREAD_ENDPOINT
 
 CHIP_ERROR InterfaceId::GetInterfaceName(char * nameBuf, size_t nameBufSize) const
 {
@@ -403,7 +462,7 @@ CHIP_ERROR InterfaceId::GetLinkLocalAddr(IPAddress * llAddr) const
 
 #endif // CHIP_SYSTEM_CONFIG_USE_LWIP
 
-#if CHIP_SYSTEM_CONFIG_USE_SOCKETS && CHIP_SYSTEM_CONFIG_USE_BSD_IFADDRS
+#if (CHIP_SYSTEM_CONFIG_USE_SOCKETS || CHIP_SYSTEM_CONFIG_USE_NETWORK_FRAMEWORK) && CHIP_SYSTEM_CONFIG_USE_BSD_IFADDRS
 
 CHIP_ERROR InterfaceId::GetInterfaceName(char * nameBuf, size_t nameBufSize) const
 {
@@ -469,12 +528,12 @@ int GetIOCTLSocket()
     {
         int s;
 #ifdef SOCK_CLOEXEC
-        s = socket(AF_INET, SOCK_STREAM, SOCK_CLOEXEC);
+        s = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
         if (s < 0)
 #endif
         {
             s = socket(AF_INET, SOCK_STREAM, 0);
-            fcntl(s, O_CLOEXEC);
+            fcntl(s, F_SETFD, O_CLOEXEC);
         }
 
         if (!__sync_bool_compare_and_swap(&sIOCTLSocket, -1, s))
@@ -757,7 +816,7 @@ CHIP_ERROR InterfaceId::GetLinkLocalAddr(IPAddress * llAddr) const
     return (found) ? CHIP_NO_ERROR : INET_ERROR_ADDRESS_NOT_FOUND;
 }
 
-#endif // CHIP_SYSTEM_CONFIG_USE_SOCKETS && CHIP_SYSTEM_CONFIG_USE_BSD_IFADDRS
+#endif // (CHIP_SYSTEM_CONFIG_USE_SOCKETS || CHIP_SYSTEM_CONFIG_USE_NETWORK_FRAMEWORK) && CHIP_SYSTEM_CONFIG_USE_BSD_IFADDRS
 
 #if CHIP_SYSTEM_CONFIG_USE_ZEPHYR_NET_IF
 
@@ -908,9 +967,12 @@ bool InterfaceAddressIterator::Next()
             mIpv6 = config->ip.ipv6;
         }
 
-        while (++mCurAddrIndex < NET_IF_MAX_IPV6_ADDR)
-            if (mIpv6->unicast[mCurAddrIndex].is_used)
-                return true;
+        if (mIpv6)
+        {
+            while (++mCurAddrIndex < NET_IF_MAX_IPV6_ADDR)
+                if (mIpv6->unicast[mCurAddrIndex].is_used)
+                    return true;
+        }
 
         mCurAddrIndex = -1;
         mIntfIter.Next();
@@ -982,6 +1044,391 @@ CHIP_ERROR InterfaceId::GetLinkLocalAddr(IPAddress * llAddr) const
 }
 
 #endif // CHIP_SYSTEM_CONFIG_USE_ZEPHYR_NET_IF
+
+#if CHIP_SYSTEM_CONFIG_USE_NETXDUO
+
+/**
+ * @brief   Return the NetXDuo IP instance for an interface id
+ *
+ * @details
+ *   NetXDuo does not have the concept of interface ids. It has IP instance structures,
+ *   each with one or more interfaces in the instance structure. The interface id is mapped
+ *   onto the IP/interface elements.
+ */
+NX_IP * Get_NetXDuo_IP_By_Id(ULONG intrId)
+{
+    NX_IP *ip = NULL;
+
+    if (intrId > NX_MAX_IP_INTERFACES * _nx_ip_created_count)
+    {
+        return NULL;
+    }
+
+    /*
+     * Traverse the created IP list and find the one associated with this interface id
+     * Disable interrupts while traversing the list to prevent it being modified while
+     * in use.
+     */
+
+    TX_INTERRUPT_SAVE_AREA
+    ULONG i;
+
+    TX_DISABLE
+    for (ip = _nx_ip_created_ptr, i = 0; i < intrId / NX_MAX_IP_INTERFACES; ip = ip->nx_ip_created_next, i += NX_MAX_IP_INTERFACES)
+        ;
+    /* Restore previous interrupt posture.  */
+    TX_RESTORE
+
+    return ip;
+}
+
+CHIP_ERROR InterfaceId::GetNetXDuoInterfaceIP(NX_IP * & nx_ip, NX_INTERFACE * & nx_interface)
+{
+    CHIP_ERROR res = CHIP_NO_ERROR;
+    PlatformType interface = mPlatformInterface;
+
+    // For NetXDuo we need an IP instance when creating a socket. Other environments don't need
+    // an interface defined until later. So if we don't have an interface, use the first one as a default.
+    if (!interface)
+    {
+        interface = 1;
+    }
+    if (interface)
+    {
+        if ((nx_ip = Get_NetXDuo_IP_By_Id(interface)) == nullptr)
+        {
+            res = CHIP_ERROR_INCORRECT_STATE;
+        }
+    }
+    else
+    {
+        res = CHIP_ERROR_INCORRECT_STATE;
+    }
+
+    if (res == CHIP_NO_ERROR)
+    {
+        nx_interface = &nx_ip->nx_ip_interface[(interface - 1) % NX_MAX_IP_INTERFACES];
+    }
+
+    return res;
+}
+
+CHIP_ERROR InterfaceId::GetInterfaceName(char * nameBuf, size_t nameBufSize) const
+{
+    if (mPlatformInterface)
+    {
+        NX_IP * currentIP = Get_NetXDuo_IP_By_Id(mPlatformInterface);
+        if (!currentIP)
+        {
+            return CHIP_ERROR_INCORRECT_STATE;
+        }
+        NX_INTERFACE * currentInterface = &currentIP->nx_ip_interface[(mPlatformInterface - 1) % NX_MAX_IP_INTERFACES];
+        if (!currentInterface->nx_interface_valid)
+        {
+            return CHIP_ERROR_INCORRECT_STATE;
+        }
+        const char * name = currentInterface->nx_interface_name;
+        size_t nameLength = strlen(name);
+        if (nameLength >= nameBufSize)
+        {
+            return CHIP_ERROR_BUFFER_TOO_SMALL;
+        }
+        Platform::CopyString(nameBuf, nameBufSize, name);
+        return CHIP_NO_ERROR;
+    }
+    if (nameBufSize < 1)
+    {
+        return CHIP_ERROR_BUFFER_TOO_SMALL;
+    }
+    nameBuf[0] = 0;
+    return CHIP_NO_ERROR;
+}
+
+CHIP_ERROR InterfaceId::InterfaceNameToId(const char * intfName, InterfaceId & interface)
+{
+    int currentId = 0;
+    NX_IP * currentIP;
+
+    while ((currentIP = Get_NetXDuo_IP_By_Id(++currentId)) != nullptr)
+    {
+        NX_INTERFACE * currentInterface = &currentIP->nx_ip_interface[(currentId - 1) % NX_MAX_IP_INTERFACES];
+        if (currentInterface->nx_interface_valid && currentInterface->nx_interface_name &&
+            strcmp(currentInterface->nx_interface_name, intfName) == 0)
+        {
+            interface = InterfaceId(currentId);
+            return CHIP_NO_ERROR;
+        }
+    }
+    interface = InterfaceId::Null();
+    return INET_ERROR_UNKNOWN_INTERFACE;
+}
+
+InterfaceIterator::InterfaceIterator() : mCurrentInterface(Get_NetXDuo_IP_By_Id(mCurrentId)) {}
+
+bool InterfaceIterator::HasCurrent(void)
+{
+    return (mCurrentInterface != nullptr &&
+            mCurrentInterface->nx_ip_interface[(mCurrentId - 1) % NX_MAX_IP_INTERFACES].nx_interface_valid);
+}
+
+bool InterfaceIterator::Next()
+{
+    mCurrentInterface = Get_NetXDuo_IP_By_Id(++mCurrentId);
+    return HasCurrent();
+}
+
+InterfaceId InterfaceIterator::GetInterfaceId(void)
+{
+    return HasCurrent() ? InterfaceId(mCurrentId) : InterfaceId::Null();
+}
+
+CHIP_ERROR InterfaceIterator::GetInterfaceName(char * nameBuf, size_t nameBufSize)
+{
+    VerifyOrReturnError(HasCurrent(), CHIP_ERROR_INCORRECT_STATE);
+    return InterfaceId(mCurrentId).GetInterfaceName(nameBuf, nameBufSize);
+}
+
+bool InterfaceIterator::IsUp()
+{
+    if (HasCurrent())
+    {
+        UINT status;
+        ULONG temp;
+
+        status = nx_ip_interface_status_check(mCurrentInterface, (mCurrentId - 1) % NX_MAX_IP_INTERFACES,
+                                              NX_IP_LINK_ENABLED, &temp, NX_NO_WAIT);
+        return (status == NX_SUCCESS);
+    }
+    return false;
+}
+
+bool InterfaceIterator::SupportsMulticast()
+{
+#if defined(NX_ENABLE_IPV6_MULTICAST)
+    return HasCurrent();
+#else
+    return false;
+#endif
+}
+
+bool InterfaceIterator::HasBroadcastAddress()
+{
+#if !defined(NX_DISABLE_IPV4)
+    return HasCurrent();
+#else
+    return false;
+#endif
+}
+
+CHIP_ERROR InterfaceIterator::GetInterfaceType(InterfaceType & type)
+{
+    return CHIP_ERROR_NOT_IMPLEMENTED;
+}
+
+CHIP_ERROR InterfaceIterator::GetHardwareAddress(uint8_t * addressBuffer, uint8_t & addressSize, uint8_t addressBufferSize)
+{
+    VerifyOrReturnError(HasCurrent(), CHIP_ERROR_INCORRECT_STATE);
+
+    if (!addressBuffer)
+        return CHIP_ERROR_INVALID_ARGUMENT;
+
+    if (addressBufferSize < 6)
+        return CHIP_ERROR_BUFFER_TOO_SMALL;
+
+    ULONG physical_msw;
+    ULONG physical_lsw;
+    if (nx_ip_interface_physical_address_get(mCurrentInterface, (mCurrentId - 1) % NX_MAX_IP_INTERFACES,
+                                             &physical_msw, &physical_lsw) != NX_SUCCESS)
+    {
+        return CHIP_ERROR_INCORRECT_STATE;
+    }
+
+    addressSize = 6;
+    addressBuffer[0] = (uint8_t)((physical_msw >>  8) & 0xFF);
+    addressBuffer[1] = (uint8_t)((physical_msw >>  0) & 0xFF);
+    addressBuffer[2] = (uint8_t)((physical_lsw >> 24) & 0xFF);
+    addressBuffer[3] = (uint8_t)((physical_lsw >> 16) & 0xFF);
+    addressBuffer[4] = (uint8_t)((physical_lsw >>  8) & 0xFF);
+    addressBuffer[5] = (uint8_t)((physical_lsw >>  0) & 0xFF);
+
+    return CHIP_NO_ERROR;
+}
+
+InterfaceAddressIterator::InterfaceAddressIterator() = default;
+
+bool InterfaceAddressIterator::HasCurrent()
+{
+    return mIntfIter.HasCurrent() && (mCurAddrIndex >= 0 || Next());
+}
+
+#define NUM_IPV6_ADDRS  (3)
+
+/**
+ * @brief   Return the IPv6 interface address for the current index
+ */
+NXD_IPV6_ADDRESS * Get_NetXDuo_Interface_IPv6_Address(NX_INTERFACE * interface, int addrIndex)
+{
+    if (interface != nullptr && addrIndex < NUM_IPV6_ADDRS)
+    {
+        NXD_IPV6_ADDRESS * addr = interface->nxd_interface_ipv6_address_list_head;
+        int i = 0;
+        while (i < addrIndex && addr != nullptr)
+        {
+            addr = addr->nxd_ipv6_address_next;
+            i++;
+        }
+        if (addr != nullptr && addr->nxd_ipv6_address_valid)
+        {
+            return addr;
+        }
+    }
+    return nullptr;
+}
+
+bool InterfaceAddressIterator::Next()
+{
+    while (mIntfIter.HasCurrent())
+    {
+        if (mCurAddrIndex == -1) // first address for the current interface
+        {
+            NX_IP * ip = Get_NetXDuo_IP_By_Id(mIntfIter.GetInterfaceId().GetPlatformInterface());
+            if (ip == NULL)
+                return false;
+            mInterface = &ip->nx_ip_interface[(mIntfIter.GetInterfaceId().GetPlatformInterface() - 1) % NX_MAX_IP_INTERFACES];
+        }
+
+        while (++mCurAddrIndex < NUM_IPV6_ADDRS)
+        {
+            if (Get_NetXDuo_Interface_IPv6_Address(mInterface, mCurAddrIndex))
+                return true;
+        }
+
+#if INET_CONFIG_ENABLE_IPV4 && !defined(NX_DISABLE_IPV4)
+        if (mCurAddrIndex == NUM_IPV6_ADDRS && mInterface->nx_interface_ip_address != 0)
+        {
+            return true;
+        }
+#endif // INET_CONFIG_ENABLE_IPV4 && !defined(NX_DISABLE_IPV4)
+
+        mCurAddrIndex = -1;
+        mIntfIter.Next();
+    }
+
+    return false;
+}
+
+CHIP_ERROR InterfaceAddressIterator::GetAddress(IPAddress & outIPAddress)
+{
+    if (!HasCurrent())
+    {
+        return CHIP_ERROR_SENTINEL;
+    }
+
+    if (mCurAddrIndex < NUM_IPV6_ADDRS)
+    {
+        NXD_IPV6_ADDRESS * addr = Get_NetXDuo_Interface_IPv6_Address(mInterface, mCurAddrIndex);
+        if (addr != nullptr)
+        {
+            // NetXDuo addresses are in host byte order. Convert to network byte order for IPAddress.
+            ULONG ipv6_addr[4];
+            COPY_IPV6_ADDRESS(addr->nxd_ipv6_address, ipv6_addr);
+            NX_IPV6_ADDRESS_CHANGE_ENDIAN(ipv6_addr);
+            outIPAddress = IPAddress(ipv6_addr);
+            return CHIP_NO_ERROR;
+        }
+    }
+
+#if INET_CONFIG_ENABLE_IPV4 && !defined(NX_DISABLE_IPV4)
+    outIPAddress = IPAddress(mInterface->nx_interface_ip_address);
+    return CHIP_NO_ERROR;
+#else
+    return CHIP_ERROR_INTERNAL;
+#endif // INET_CONFIG_ENABLE_IPV4 && !defined(NX_DISABLE_IPV4)
+}
+
+uint8_t InterfaceAddressIterator::GetPrefixLength()
+{
+    if (HasCurrent())
+    {
+        if (mCurAddrIndex < NUM_IPV6_ADDRS)
+        {
+            NXD_IPV6_ADDRESS * addr = Get_NetXDuo_Interface_IPv6_Address(mInterface, mCurAddrIndex);
+            if (addr != nullptr)
+            {
+                return addr->nxd_ipv6_address_prefix_length;
+            }
+        }
+    }
+    return 0;
+}
+
+InterfaceId InterfaceAddressIterator::GetInterfaceId()
+{
+    return HasCurrent() ? mIntfIter.GetInterfaceId() : InterfaceId::Null();
+}
+
+CHIP_ERROR InterfaceAddressIterator::GetInterfaceName(char * nameBuf, size_t nameBufSize)
+{
+    VerifyOrReturnError(HasCurrent(), CHIP_ERROR_INCORRECT_STATE);
+    return mIntfIter.GetInterfaceName(nameBuf, nameBufSize);
+}
+
+bool InterfaceAddressIterator::IsUp()
+{
+    return HasCurrent() && mIntfIter.IsUp();
+}
+
+bool InterfaceAddressIterator::SupportsMulticast()
+{
+    return HasCurrent() && mIntfIter.SupportsMulticast();
+}
+
+bool InterfaceAddressIterator::HasBroadcastAddress()
+{
+    return HasCurrent() && mIntfIter.HasBroadcastAddress();
+}
+
+CHIP_ERROR InterfaceId::GetLinkLocalAddr(IPAddress * llAddr) const
+{
+    VerifyOrReturnError(llAddr != nullptr, CHIP_ERROR_INVALID_ARGUMENT);
+
+    NX_IP * ip;
+    int intrId;
+    if (mPlatformInterface)
+    {
+        ip     = Get_NetXDuo_IP_By_Id(mPlatformInterface);
+        intrId = (mPlatformInterface - 1) % NX_MAX_IP_INTERFACES;
+    }
+    else
+    {
+        ip     = _nx_ip_created_ptr;
+        intrId = 0;
+    }
+
+    VerifyOrReturnError(ip != nullptr, INET_ERROR_ADDRESS_NOT_FOUND);
+
+    NX_INTERFACE * interface = &ip->nx_ip_interface[intrId];
+    if (interface->nx_interface_valid)
+    {
+        NXD_IPV6_ADDRESS * ipv6Addr = interface->nxd_interface_ipv6_address_list_head;
+        for (int i = 0; i < NUM_IPV6_ADDRS && ipv6Addr != nullptr; i++, ipv6Addr = ipv6Addr->nxd_ipv6_address_next)
+        {
+            if (ipv6Addr->nxd_ipv6_address_valid && ipv6Addr->nxd_ipv6_address_prefix_length == 10)
+            {
+                // NetXDuo addresses are in host byte order. Convert to network byte order for IPAddress.
+                ULONG ipv6_addr[4];
+                COPY_IPV6_ADDRESS(ipv6Addr->nxd_ipv6_address, ipv6_addr);
+                NX_IPV6_ADDRESS_CHANGE_ENDIAN(ipv6_addr);
+                *llAddr = IPAddress(ipv6_addr);
+                return CHIP_NO_ERROR;
+            }
+        }
+    }
+
+    return INET_ERROR_ADDRESS_NOT_FOUND;
+}
+
+#endif // CHIP_SYSTEM_CONFIG_USE_NETXDUO
 
 // static
 InterfaceId InterfaceId::FromIPAddress(const IPAddress & addr)

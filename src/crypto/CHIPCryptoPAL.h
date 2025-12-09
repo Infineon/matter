@@ -30,11 +30,14 @@
 
 #include <lib/core/CHIPError.h>
 #include <lib/core/CHIPVendorIdentifiers.hpp>
+#include <lib/core/DataModelTypes.h>
 #include <lib/core/Optional.h>
+#include <lib/support/Base64.h>
 #include <lib/support/BufferReader.h>
 #include <lib/support/CodeUtils.h>
 #include <lib/support/SafePointerCast.h>
 #include <lib/support/Span.h>
+#include <lib/support/StringBuilder.h>
 
 #include <stddef.h>
 #include <string.h>
@@ -55,8 +58,8 @@ inline constexpr size_t kMaxCertificateSerialNumberLength      = 20;
 inline constexpr size_t kMaxCertificateDistinguishedNameLength = 200;
 inline constexpr size_t kMaxCRLDistributionPointURLLength      = 100;
 
-inline constexpr const char * kValidCDPURIHttpPrefix  = "http://";
-inline constexpr const char * kValidCDPURIHttpsPrefix = "https://";
+inline constexpr char kValidCDPURIHttpPrefix[]  = "http://";
+inline constexpr char kValidCDPURIHttpsPrefix[] = "https://";
 
 inline constexpr size_t CHIP_CRYPTO_GROUP_SIZE_BYTES      = kP256_FE_Length;
 inline constexpr size_t CHIP_CRYPTO_PUBLIC_KEY_SIZE_BYTES = kP256_Point_Length;
@@ -92,6 +95,7 @@ inline constexpr size_t kAES_CCM128_Key_Length   = 128u / 8u;
 inline constexpr size_t kAES_CCM128_Block_Length = kAES_CCM128_Key_Length;
 inline constexpr size_t kAES_CCM128_Nonce_Length = 13;
 inline constexpr size_t kAES_CCM128_Tag_Length   = 16;
+inline constexpr size_t kHMAC_CCM128_Key_Length  = 128u / 8u;
 
 inline constexpr size_t CHIP_CRYPTO_AEAD_NONCE_LENGTH_BYTES = kAES_CCM128_Nonce_Length;
 
@@ -114,6 +118,41 @@ inline constexpr char kVIDPrefixForCNEncoding[]    = "Mvid:";
 inline constexpr char kPIDPrefixForCNEncoding[]    = "Mpid:";
 inline constexpr size_t kVIDandPIDHexLength        = sizeof(uint16_t) * 2;
 inline constexpr size_t kMax_CommonNameAttr_Length = 64;
+
+enum class FabricBindingVersion : uint8_t
+{
+    kVersion1 = 0x01 // Initial version using version 1.0 of the Matter Cryptographic Primitives.
+};
+
+// VidVerificationStatementVersion is on purpose different and non-overlapping with FabricBindingVersion.
+enum class VidVerificationStatementVersion : uint8_t
+{
+    kVersion1 = 0x21 // Initial version using version 1.0 of the Matter Cryptographic Primitives.
+};
+
+inline constexpr uint8_t kFabricBindingVersionV1 = 1u;
+
+inline constexpr size_t kVendorIdVerificationClientChallengeSize = 32u;
+
+// VIDVerificationStatement := statement_version || vid_verification_signer_skid || vid_verification_statement_signature
+inline constexpr size_t kVendorIdVerificationStatementV1Size =
+    sizeof(uint8_t) + kSubjectKeyIdentifierLength + kP256_ECDSA_Signature_Length_Raw;
+static_assert(
+    kVendorIdVerificationStatementV1Size == 85,
+    "Expected size of VendorIdVerificationStatement version 1 was computed incorrectly due to changes of fundamental constants");
+
+// vendor_fabric_binding_message := fabric_binding_version (1 byte) || root_public_key || fabric_id || vendor_id
+inline constexpr size_t kVendorFabricBindingMessageV1Size =
+    sizeof(uint8_t) + CHIP_CRYPTO_PUBLIC_KEY_SIZE_BYTES + sizeof(uint64_t) + sizeof(uint16_t);
+static_assert(
+    kVendorFabricBindingMessageV1Size == 76,
+    "Expected size of VendorFabricBindingMessage version 1 was computed incorrectly due to changes of fundamental constants");
+
+// vendor_id_verification_tbs := fabric_binding_version || client_challenge || attestation_challenge || fabric_index ||
+// vendor_fabric_binding_message || <vid_verification_statement>
+inline constexpr size_t kVendorIdVerificationTbsV1MaxSize = sizeof(uint8_t) + kVendorIdVerificationClientChallengeSize +
+    CHIP_CRYPTO_SYMMETRIC_KEY_LENGTH_BYTES + sizeof(uint8_t) + kVendorFabricBindingMessageV1Size +
+    kVendorIdVerificationStatementV1Size;
 
 /*
  * Overhead to encode a raw ECDSA signature in X9.62 format in ASN.1 DER
@@ -221,8 +260,16 @@ bool IsBufferContentEqualConstantTime(const void * a, const void * b, size_t n);
 template <typename Sig>
 class ECPKey
 {
+protected:
+    // This base type can't be copied / assigned directly.
+    // Sub-types should be either uncopyable or final.
+    ECPKey()                           = default;
+    ECPKey(const ECPKey &)             = default;
+    ECPKey & operator=(const ECPKey &) = default;
+
 public:
-    virtual ~ECPKey() {}
+    virtual ~ECPKey() = default;
+
     virtual SupportedECPKeyTypes Type() const  = 0;
     virtual size_t Length() const              = 0;
     virtual bool IsUncompressed() const        = 0;
@@ -257,7 +304,8 @@ public:
         // Sanitize after use
         ClearSecretData(mBytes);
     }
-
+    SensitiveDataBuffer() {}
+    SensitiveDataBuffer(const SensitiveDataBuffer & other) { *this = other; }
     SensitiveDataBuffer & operator=(const SensitiveDataBuffer & other)
     {
         // Guard self assignment
@@ -376,10 +424,11 @@ using IdentityProtectionKeySpan = FixedByteSpan<Crypto::CHIP_CRYPTO_SYMMETRIC_KE
 
 using AttestationChallenge = SensitiveDataFixedBuffer<CHIP_CRYPTO_SYMMETRIC_KEY_LENGTH_BYTES>;
 
-class P256PublicKey : public ECPKey<P256ECDSASignature>
+class P256PublicKey final // final due to being copyable
+    : public ECPKey<P256ECDSASignature>
 {
 public:
-    P256PublicKey() {}
+    P256PublicKey() = default;
 
     template <size_t N>
     constexpr P256PublicKey(const uint8_t (&raw_value)[N])
@@ -429,8 +478,15 @@ private:
 template <typename PK, typename Secret, typename Sig>
 class ECPKeypair
 {
+protected:
+    // This base type can't be copied / assigned directly.
+    // Sub-types should be either uncopyable or final.
+    ECPKeypair()                               = default;
+    ECPKeypair(const ECPKeypair &)             = default;
+    ECPKeypair & operator=(const ECPKeypair &) = default;
+
 public:
-    virtual ~ECPKeypair() {}
+    virtual ~ECPKeypair() = default;
 
     /** @brief Generate a new Certificate Signing Request (CSR).
      * @param csr Newly generated CSR in DER format
@@ -467,10 +523,20 @@ struct alignas(size_t) P256KeypairContext
     uint8_t mBytes[kMAX_P256Keypair_Context_Size];
 };
 
+/**
+ * A serialized P256 key pair is the concatenation of the public and private keys, in that order.
+ */
 using P256SerializedKeypair = SensitiveDataBuffer<kP256_PublicKey_Length + kP256_PrivateKey_Length>;
 
 class P256KeypairBase : public ECPKeypair<P256PublicKey, P256ECDHDerivedSecret, P256ECDSASignature>
 {
+protected:
+    // This base type can't be copied / assigned directly.
+    // Sub-types should be either uncopyable or final.
+    P256KeypairBase()                                    = default;
+    P256KeypairBase(const P256KeypairBase &)             = default;
+    P256KeypairBase & operator=(const P256KeypairBase &) = default;
+
 public:
     /**
      * @brief Initialize the keypair.
@@ -494,8 +560,12 @@ public:
 class P256Keypair : public P256KeypairBase
 {
 public:
-    P256Keypair() {}
+    P256Keypair() = default;
     ~P256Keypair() override;
+
+    // P256Keypair can't be copied / assigned.
+    P256Keypair(const P256Keypair &)             = delete;
+    P256Keypair & operator=(const P256Keypair &) = delete;
 
     /**
      * @brief Initialize the keypair.
@@ -553,35 +623,42 @@ public:
      **/
     const P256PublicKey & Pubkey() const override { return mPublicKey; }
 
+#if CHIP_WITH_NLFAULTINJECTION
+    P256PublicKey & TestOnlyMutablePubkey() { return mPublicKey; }
+#endif
+
     /** Release resources associated with this key pair */
     void Clear();
 
 protected:
+#if CHIP_WITH_NLFAULTINJECTION
+    mutable P256PublicKey mPublicKey;
+#else
     P256PublicKey mPublicKey;
+#endif
+    // P256PublicKey mPublicKey;
     mutable P256KeypairContext mKeypair;
     bool mInitialized = false;
 };
 
-using Aes128KeyByteArray = uint8_t[CHIP_CRYPTO_SYMMETRIC_KEY_LENGTH_BYTES];
-
 /**
- * @brief Platform-specific AES key
+ * @brief Platform-specific symmetric key handle
  *
- * The class represents AES key used by Matter stack either in the form of raw key material or key
+ * The class represents a key used by the Matter stack either in the form of raw key material or key
  * reference, depending on the platform. To achieve that, it contains an opaque context that can be
- * cast to a concrete representation used by the given platform. Note that currently Matter uses
- * 128-bit symmetric keys only.
+ * cast to a concrete representation used by the given platform.
+ *
+ * @note SymmetricKeyHandle is an abstract class to force child classes for each key handle type.
+ *       SymmetricKeyHandle class implements all the necessary components for handles.
  */
-class Aes128KeyHandle
+template <size_t ContextSize>
+class SymmetricKeyHandle
 {
 public:
-    Aes128KeyHandle() = default;
-    ~Aes128KeyHandle() { ClearSecretData(mContext.mOpaque); }
-
-    Aes128KeyHandle(const Aes128KeyHandle &) = delete;
-    Aes128KeyHandle(Aes128KeyHandle &&)      = delete;
-    void operator=(const Aes128KeyHandle &)  = delete;
-    void operator=(Aes128KeyHandle &&)       = delete;
+    SymmetricKeyHandle(const SymmetricKeyHandle &) = delete;
+    SymmetricKeyHandle(SymmetricKeyHandle &&)      = delete;
+    void operator=(const SymmetricKeyHandle &)     = delete;
+    void operator=(SymmetricKeyHandle &&)          = delete;
 
     /**
      * @brief Get internal context cast to the desired key representation
@@ -601,13 +678,45 @@ public:
         return *SafePointerCast<T *>(&mContext);
     }
 
-private:
-    static constexpr size_t kContextSize = CHIP_CRYPTO_SYMMETRIC_KEY_LENGTH_BYTES;
+protected:
+    SymmetricKeyHandle() = default;
+    ~SymmetricKeyHandle() { ClearSecretData(mContext.mOpaque); }
 
+private:
     struct alignas(uintptr_t) OpaqueContext
     {
-        uint8_t mOpaque[kContextSize] = {};
+        uint8_t mOpaque[ContextSize] = {};
     } mContext;
+};
+
+using Symmetric128BitsKeyByteArray = uint8_t[CHIP_CRYPTO_SYMMETRIC_KEY_LENGTH_BYTES];
+
+/**
+ * @brief Platform-specific 128-bit symmetric key handle
+ */
+class Symmetric128BitsKeyHandle : public SymmetricKeyHandle<CHIP_CRYPTO_SYMMETRIC_KEY_LENGTH_BYTES>
+{
+};
+
+/**
+ * @brief Platform-specific 128-bit AES key handle
+ */
+class Aes128KeyHandle final : public Symmetric128BitsKeyHandle
+{
+};
+
+/**
+ * @brief Platform-specific 128-bit HMAC key handle
+ */
+class Hmac128KeyHandle final : public Symmetric128BitsKeyHandle
+{
+};
+
+/**
+ * @brief Platform-specific HKDF key handle
+ */
+class HkdfKeyHandle final : public SymmetricKeyHandle<CHIP_CONFIG_HKDF_KEY_HANDLE_CONTEXT_SIZE>
+{
 };
 
 /**
@@ -879,14 +988,17 @@ public:
     void Clear();
 
 private:
+    // Check if the digest computation has been initialized; implement this if your backend needs it.
+    bool IsInitialized();
+
     HashSHA256OpaqueContext mContext;
 };
 
 class HKDF_sha
 {
 public:
-    HKDF_sha() {}
-    virtual ~HKDF_sha() {}
+    HKDF_sha()          = default;
+    virtual ~HKDF_sha() = default;
 
     /**
      * @brief A function that implements SHA-256 based HKDF
@@ -918,8 +1030,8 @@ public:
 class HMAC_sha
 {
 public:
-    HMAC_sha() {}
-    virtual ~HMAC_sha() {}
+    HMAC_sha()          = default;
+    virtual ~HMAC_sha() = default;
 
     /**
      * @brief A function that implements SHA-256 based HMAC per FIPS1981.
@@ -946,6 +1058,31 @@ public:
      **/
 
     virtual CHIP_ERROR HMAC_SHA256(const uint8_t * key, size_t key_length, const uint8_t * message, size_t message_length,
+                                   uint8_t * out_buffer, size_t out_length);
+
+    /**
+     * @brief A function that implements SHA-256 based HMAC per FIPS1981.
+     *
+     * This implements the CHIP_Crypto_HMAC() cryptographic primitive
+     * in the the specification.
+     *
+     * The `out_length` must be at least kSHA256_Hash_Length, and only
+     * kSHA256_Hash_Length bytes are written to out_buffer.
+     *
+     * Error values are:
+     *   - CHIP_ERROR_INVALID_ARGUMENT: for any bad arguments or nullptr input on
+     *     any pointer.
+     *   - CHIP_ERROR_INTERNAL: for any unexpected error arising in the underlying
+     *     cryptographic layers.
+     *
+     * @param key The HMAC Key handle to use for the HMAC operation
+     * @param message Message over which to compute the HMAC
+     * @param message_length Length of the message over which to compute the HMAC
+     * @param out_buffer Pointer to buffer into which to write the output.
+     * @param out_length Underlying size of the `out_buffer`.
+     * @return Returns a CHIP_ERROR on error, CHIP_NO_ERROR otherwise
+     **/
+    virtual CHIP_ERROR HMAC_SHA256(const Hmac128KeyHandle & key, const uint8_t * message, size_t message_length,
                                    uint8_t * out_buffer, size_t out_length);
 };
 
@@ -984,8 +1121,8 @@ CHIP_ERROR add_entropy_source(entropy_source fn_source, void * p_source, size_t 
 class PBKDF2_sha256
 {
 public:
-    PBKDF2_sha256() {}
-    virtual ~PBKDF2_sha256() {}
+    PBKDF2_sha256()          = default;
+    virtual ~PBKDF2_sha256() = default;
 
     /** @brief Function to derive key using password. SHA256 hashing algorithm is used for calculating hmac.
      * @param password password used for key derivation
@@ -1000,6 +1137,9 @@ public:
     virtual CHIP_ERROR pbkdf2_sha256(const uint8_t * password, size_t plen, const uint8_t * salt, size_t slen,
                                      unsigned int iteration_count, uint32_t key_length, uint8_t * output);
 };
+
+// TODO: Extract Spake2p to a separate header and replace the forward declaration with #include SessionKeystore.h
+class SessionKeystore;
 
 /**
  * The below class implements the draft 01 version of the Spake2+ protocol as
@@ -1026,7 +1166,7 @@ class Spake2p
 {
 public:
     Spake2p(size_t fe_size, size_t point_size, size_t hash_size);
-    virtual ~Spake2p() {}
+    virtual ~Spake2p() = default;
 
     /**
      * @brief Initialize Spake2+ with some context specific information.
@@ -1070,16 +1210,16 @@ public:
      * @param my_identity_len   The prover identity length.
      * @param peer_identity     The peer identity. May be NULL if identities are not established.
      * @param peer_identity_len The peer identity length.
-     * @param w0in              The input w0 (an output from the PBKDF).
-     * @param w0in_len          The input w0 length.
-     * @param w1in              The input w1 (an output from the PBKDF).
-     * @param w1in_len          The input w1 length.
+     * @param w0sin             The input w0s (an output from the PBKDF).
+     * @param w0sin_len         The input w0s length.
+     * @param w1sin             The input w1s (an output from the PBKDF).
+     * @param w1sin_len         The input w1s length.
      *
      * @return Returns a CHIP_ERROR on error, CHIP_NO_ERROR otherwise
      **/
     virtual CHIP_ERROR BeginProver(const uint8_t * my_identity, size_t my_identity_len, const uint8_t * peer_identity,
-                                   size_t peer_identity_len, const uint8_t * w0in, size_t w0in_len, const uint8_t * w1in,
-                                   size_t w1in_len);
+                                   size_t peer_identity_len, const uint8_t * w0sin, size_t w0sin_len, const uint8_t * w1sin,
+                                   size_t w1sin_len);
 
     /**
      * @brief Compute the first round of the protocol.
@@ -1116,14 +1256,17 @@ public:
     virtual CHIP_ERROR KeyConfirm(const uint8_t * in, size_t in_len);
 
     /**
-     * @brief Return the shared secret.
+     * @brief Return the shared HKDF key.
      *
-     * @param out     The output secret.
-     * @param out_len The output secret length.
+     * Returns the shared key established during the Spake2+ process, which can be used
+     * to derive application-specific keys using HKDF.
+     *
+     * @param keystore The session keystore for managing the HKDF key lifetime.
+     * @param key The output HKDF key.
      *
      * @return Returns a CHIP_ERROR on error, CHIP_NO_ERROR otherwise
      **/
-    CHIP_ERROR GetKeys(uint8_t * out, size_t * out_len);
+    CHIP_ERROR GetKeys(SessionKeystore & keystore, HkdfKeyHandle & key);
 
     CHIP_ERROR InternalHash(const uint8_t * in, size_t in_len);
     CHIP_ERROR WriteMN();
@@ -1251,26 +1394,26 @@ public:
     /*
      *   @synopsis Compute w0sin mod p
      *
-     *   @param w0out       Output field element (modulo p)
+     *   @param w0out       Output field element w0
      *   @param w0_len      Output field element length
-     *   @param w1sin       Input field element
-     *   @param w1sin_len   Input field element length
+     *   @param w0sin       Input field element
+     *   @param w0sin_len   Input field element length
      *
      *   @return Returns a CHIP_ERROR on error, CHIP_NO_ERROR otherwise
      **/
     virtual CHIP_ERROR ComputeW0(uint8_t * w0out, size_t * w0_len, const uint8_t * w0sin, size_t w0sin_len) = 0;
 
     /*
-     *   @synopsis Compute w1in*G
+     *   @synopsis Compute w1in*G where w1in is w1sin mod p
      *
      *   @param Lout        Output point in 0x04 || X || Y format.
      *   @param L_len       Output point length
-     *   @param w1in        Input field element
-     *   @param w1in_len    Input field element size
+     *   @param w1sin       Input field element
+     *   @param w1sin_len   Input field element size
      *
      *   @return Returns a CHIP_ERROR on error, CHIP_NO_ERROR otherwise
      **/
-    virtual CHIP_ERROR ComputeL(uint8_t * Lout, size_t * L_len, const uint8_t * w1in, size_t w1in_len) = 0;
+    virtual CHIP_ERROR ComputeL(uint8_t * Lout, size_t * L_len, const uint8_t * w1sin, size_t w1sin_len) = 0;
 
     void * M;
     void * N;
@@ -1425,7 +1568,7 @@ public:
     CHIP_ERROR PointIsValid(void * R) override;
 
     CHIP_ERROR ComputeW0(uint8_t * w0out, size_t * w0_len, const uint8_t * w0sin, size_t w0sin_len) override;
-    CHIP_ERROR ComputeL(uint8_t * Lout, size_t * L_len, const uint8_t * w1in, size_t w1in_len) override;
+    CHIP_ERROR ComputeL(uint8_t * Lout, size_t * L_len, const uint8_t * w1sin, size_t w1sin_len) override;
 
 protected:
     CHIP_ERROR InitImpl() override;
@@ -1465,12 +1608,12 @@ public:
     CHIP_ERROR Generate(uint32_t pbkdf2IterCount, const ByteSpan & salt, uint32_t setupPin);
 
     /**
-     * @brief Compute the initiator values (w0, w1) used for PAKE input.
+     * @brief Compute the initiator values (w0s, w1s) used for PAKE input.
      *
      * @param pbkdf2IterCount Iteration count for PBKDF2 function
      * @param salt            Salt to be used for Spake2+ operation
      * @param setupPin        Provided setup PIN (passcode)
-     * @param ws              The output pair (w0, w1) stored sequentially
+     * @param ws              The output pair (w0s, w1s) stored sequentially
      * @param ws_len          The output length
      *
      * @return CHIP_ERROR     The result from running PBKDF2
@@ -1554,6 +1697,39 @@ enum class AttestationCertType
 CHIP_ERROR VerifyAttestationCertificateFormat(const ByteSpan & cert, AttestationCertType certType);
 
 /**
+ * @brief Generate a VendorFabricBindingMessage as used by the Fabric Table Vendor ID Verification Procedure.
+ *
+ * @param[in] fabricBindingVersion - Version of binding payload to generate. outputSpan size requirements are based on this.
+ * @param[in] rootPublicKey - Root public key for the fabric in question
+ * @param[in] fabricId - Fabric ID for the fabric in question
+ * @param[in] vendorId - Vendor ID for the fabric in question
+ * @param[inout] outputSpan - Span that will receive the binding message. Must be large enough for the
+ *                            payload (otherwise CHIP_ERROR_BUFFER_TOO_SMALL) and will be resized to fit.
+ * @return CHIP_NO_ERROR on success, otherwise another CHIP_ERROR value representative of the failure.
+ */
+CHIP_ERROR GenerateVendorFabricBindingMessage(FabricBindingVersion fabricBindingVersion, const P256PublicKey & rootPublicKey,
+                                              FabricId fabricId, uint16_t vendorId, MutableByteSpan & outputSpan);
+
+/**
+ * @brief Generate the message to be signed for the Fabric Table Vendor ID Verification Procedure.
+ *
+ * The Fabric Binding Version value will be recovered from the vendorFabricBindingMessage.
+ *
+ * @param fabricIndex - Fabric Index for the fabric in question
+ * @param clientChallenge - Client challenge to use
+ * @param attestationChallenge - Attestation challenge to use
+ * @param vendorFabricBindingMessage - The VendorFabricBindingMessage previously computed for the fabric
+ * @param vidVerificationStatement - The VID Verification Statement to include in signature (may be empty)
+ * @param outputSpan - Span that will receive the to-be-signed message. Must be large enough for the
+ *                     payload (otherwise CHIP_ERROR_BUFFER_TOO_SMALL) and will be resized to fit.
+ * @return CHIP_NO_ERROR on success, otherwise another CHIP_ERROR value representative of the failure.
+ */
+CHIP_ERROR GenerateVendorIdVerificationToBeSigned(FabricIndex fabricIndex, const ByteSpan & clientChallenge,
+                                                  const ByteSpan & attestationChallenge,
+                                                  const ByteSpan & vendorFabricBindingMessage,
+                                                  const ByteSpan & vidVerificationStatement, MutableByteSpan & outputSpan);
+
+/**
  * @brief Validate notBefore timestamp of a certificate (candidateCertificate) against validity period of the
  *        issuer certificate (issuerCertificate).
  *
@@ -1629,6 +1805,112 @@ CHIP_ERROR ExtractSubjectFromX509Cert(const ByteSpan & certificate, MutableByteS
  * @brief Extracts Issuer Distinguished Name from X509 Certificate. The value is copied into buffer in a raw ASN.1 X.509 format.
  **/
 CHIP_ERROR ExtractIssuerFromX509Cert(const ByteSpan & certificate, MutableByteSpan & issuer);
+
+class PemEncoder
+{
+public:
+    /**
+     * @brief Construct a PEM encoder for element type `encodedElement` whose DER data is in `derBytes` span.
+     *
+     * LIFETIME: both encodedElement and derBytes lifetime must be >= PemEncoder lifetime.
+     *           PemEncoder references these while processing `NextLine()` calls.
+     *
+     * @param encodedElement - Element type string to include in header/footer (e.g. "CERTIFICATE"). Caller must provide correct
+     * uppercase.
+     * @param derBytes - Byte span containing data to encode. May be empty.
+     */
+    explicit PemEncoder(const char * encodedElement, ByteSpan derBytes) : mEncodedElement(encodedElement), mDerBytes(derBytes) {}
+
+    // No copies.
+    PemEncoder(const PemEncoder &)             = delete;
+    PemEncoder & operator=(const PemEncoder &) = delete;
+
+    /**
+     * @brief Returns the pointer to the next null-terminated line of the encoding, or nullptr if done.
+     *
+     * The returned pointer has the lifetime of this class and during that lifetime will always point
+     * to valid memory.
+     *
+     * When header/footer are written, the heading type (`encodedElement` value) such as
+     * `CERTIFICATE` is clamped so that the entire header line with `-----BEGIN ${encodedElement}-----`
+     * and footer line with `-----END ${encodedElement}-----` are not wider than 64 bytes. This
+     * will not happen in practice with the types of things this is meant to encode.
+     *
+     * Usage should be in a loop, for example:
+     *
+     *   std::vector<std::string> pemLines;
+     *
+     *   PemEncoder encoder("CERTIFICATE", TestCerts::sTestCert_PAA_FFF1_Cert);
+     *
+     *   const char* line = encoder.NextLine();
+     *   while (line)
+     *   {
+     *       pemLines.push_back(std::string{ line });
+     *       line = encoder.NextLine();
+     *   }
+     *
+     * @return a pointer to the internal line buffer for next line or nullptr when done.
+     */
+    const char * NextLine();
+
+private:
+    static constexpr size_t kNumBytesPerLine = 48u;
+    static constexpr size_t kLineBufferSize  = 64u + 1u; // PEM expects 64 characters wide and a null terminator at least.
+    static_assert(kLineBufferSize == (BASE64_ENCODED_LEN(kNumBytesPerLine) + 1), "Internal incoherence of library configuration!");
+
+    enum State : int
+    {
+        kPrintHeader = 0,
+        kPrintBody   = 1,
+        kPrintFooter = 2,
+        kDone        = 3,
+    };
+
+    const char * mEncodedElement; // "CERTIFICATE", "EC PUBLIC KEY", etc. Must be capitalized by caller.
+    ByteSpan mDerBytes;
+    State mState           = State::kPrintHeader;
+    size_t mProcessedBytes = 0;
+    StringBuilder<kLineBufferSize> mStringBuilder{};
+};
+
+// Utility class to take subject Key IDs (AKID/SKID) and convert them to DCL format ("A5:FF:00.....:DE:AD").
+class KeyIdStringifier
+{
+public:
+    KeyIdStringifier() = default;
+
+    /**
+     * @brief Returns the null-terminated string buffer owned by the class containing converted KeyID.
+     *
+     * LIFETIME NOTE: The last returned value from KeyIdToHex is valid until the next call.
+     *
+     * This is optimized for standard 20-byte AKID/SKID but works for any length, truncating very long ones.
+     *
+     * @param keyIdBuffer - buffer of bytes of the key ID.
+     * @return pointer to class-owned storage of a null-terminated string in DCL format.
+     */
+    const char * KeyIdToHex(ByteSpan keyIdBuffer)
+    {
+        mStringBuilder.Reset();
+        if (keyIdBuffer.empty())
+        {
+            mStringBuilder.Add("<EMPTY KEY ID>");
+            return mStringBuilder.c_str();
+        }
+
+        mStringBuilder.AddFormat("%02X", keyIdBuffer[0]);
+        for (size_t i = 1; i < keyIdBuffer.size(); ++i)
+        {
+            mStringBuilder.Add(":");
+            mStringBuilder.AddFormat("%02X", keyIdBuffer[i]);
+        }
+
+        return mStringBuilder.AddMarkerIfOverflow().c_str();
+    }
+
+private:
+    StringBuilder<(Crypto::kAuthorityKeyIdentifierLength * 3) + 1> mStringBuilder;
+};
 
 /**
  * @brief Checks for resigned version of the certificate in the list and returns it.

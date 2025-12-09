@@ -15,7 +15,6 @@
  *    limitations under the License.
  */
 
-#include <app/util/af.h>
 #include <app/util/util.h>
 
 #include <app-common/zap-generated/attributes/Accessors.h>
@@ -31,6 +30,8 @@ using namespace chip;
 using namespace chip::app;
 using namespace chip::app::Clusters;
 using namespace chip::app::Clusters::PumpConfigurationAndControl;
+
+using chip::Protocols::InteractionModel::Status;
 
 namespace chip {
 namespace app {
@@ -79,8 +80,8 @@ static void setEffectiveModes(EndpointId endpoint)
         // if this is not suitable, the application should override this value in
         // the post attribute change callback for the operation mode attribute
         const EmberAfAttributeMetadata * effectiveControlModeMetaData;
-        effectiveControlModeMetaData = GetAttributeMetadata(
-            app::ConcreteAttributePath(endpoint, PumpConfigurationAndControl::Id, Attributes::EffectiveControlMode::Id));
+        effectiveControlModeMetaData =
+            emberAfLocateAttributeMetadata(endpoint, PumpConfigurationAndControl::Id, Attributes::EffectiveControlMode::Id);
         controlMode = static_cast<ControlModeEnum>(effectiveControlModeMetaData->defaultValue.defaultValue);
     }
 
@@ -156,12 +157,12 @@ static void setEffectiveModes(EndpointId endpoint)
         // Maximum, Minimum or Local
 
     case OperationModeEnum::kMaximum: {
-#ifdef EMBER_AF_PLUGIN_LEVEL_CONTROL
+#ifdef MATTER_DM_PLUGIN_LEVEL_CONTROL
         uint8_t maxLevel;
 #endif
         Attributes::EffectiveOperationMode::Set(endpoint, OperationModeEnum::kMaximum);
         Attributes::EffectiveControlMode::Set(endpoint, ControlModeEnum::kConstantSpeed);
-#ifdef EMBER_AF_PLUGIN_LEVEL_CONTROL
+#ifdef MATTER_DM_PLUGIN_LEVEL_CONTROL
         LevelControl::Attributes::MaxLevel::Get(endpoint, &maxLevel);
         LevelControl::Attributes::CurrentLevel::Set(endpoint, maxLevel);
 #endif
@@ -175,12 +176,12 @@ static void setEffectiveModes(EndpointId endpoint)
     break;
 
     case OperationModeEnum::kMinimum: {
-#ifdef EMBER_AF_PLUGIN_LEVEL_CONTROL
+#ifdef MATTER_DM_PLUGIN_LEVEL_CONTROL
         uint8_t minLevel;
 #endif
         Attributes::EffectiveOperationMode::Set(endpoint, OperationModeEnum::kMinimum);
         Attributes::EffectiveControlMode::Set(endpoint, ControlModeEnum::kConstantSpeed);
-#ifdef EMBER_AF_PLUGIN_LEVEL_CONTROL
+#ifdef MATTER_DM_PLUGIN_LEVEL_CONTROL
         LevelControl::Attributes::MinLevel::Get(endpoint, &minLevel);
         if (minLevel == 0)
         {
@@ -232,7 +233,7 @@ bool HasFeature(EndpointId endpoint, Feature feature)
 {
     bool hasFeature;
     uint32_t featureMap;
-    hasFeature = (Attributes::FeatureMap::Get(endpoint, &featureMap) == EMBER_ZCL_STATUS_SUCCESS);
+    hasFeature = (Attributes::FeatureMap::Get(endpoint, &featureMap) == Status::Success);
 
     return hasFeature ? ((featureMap & to_underlying(feature)) != 0) : false;
 }
@@ -368,3 +369,4 @@ void MatterPumpConfigurationAndControlClusterServerAttributeChangedCallback(cons
 }
 
 void MatterPumpConfigurationAndControlPluginServerInitCallback() {}
+void MatterPumpConfigurationAndControlPluginServerShutdownCallback() {}

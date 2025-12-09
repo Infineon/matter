@@ -19,14 +19,15 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <optional>
 
 #include <lib/core/CHIPError.h>
-#include <lib/core/Optional.h>
 #include <lib/core/PeerId.h>
 #include <lib/dnssd/TxtFields.h>
 #include <lib/support/CHIPMemString.h>
 #include <lib/support/SafeString.h>
 #include <lib/support/Span.h>
+#include <platform/CHIPDeviceConfig.h>
 
 namespace chip {
 namespace Dnssd {
@@ -46,6 +47,21 @@ enum class CommissioningMode
     kDisabled,       // Commissioning Mode is disabled, CM=0 in DNS-SD key/value pairs
     kEnabledBasic,   // Basic Commissioning Mode, CM=1 in DNS-SD key/value pairs
     kEnabledEnhanced // Enhanced Commissioning Mode, CM=2 in DNS-SD key/value pairs
+};
+
+enum class ICDModeAdvertise : uint8_t
+{
+    kNone, // The device does not support the LIT feature-set. No ICD= key is advertised in DNS-SD.
+    kSIT,  // The ICD supports the LIT feature-set, but is currently operating as a SIT. ICD=0 in DNS-SD key/value pairs.
+    kLIT,  // The ICD is currently operating as a LIT. ICD=1 in DNS-SD key/value pairs.
+};
+
+enum class TCPModeAdvertise : uint16_t
+{
+    kNone            = 0,                         // The device does not support TCP.
+    kTCPClient       = 1 << 1,                    // The device supports the TCP client.
+    kTCPServer       = 1 << 2,                    // The device supports the TCP server.
+    kTCPClientServer = (kTCPClient | kTCPServer), // The device supports both the TCP client and server.
 };
 
 template <class Derived>
@@ -88,18 +104,26 @@ public:
     const chip::ByteSpan GetMac() const { return chip::ByteSpan(mMacStorage, mMacLength); }
 
     // Common Flags
-    Derived & SetLocalMRPConfig(const Optional<ReliableMessageProtocolConfig> & config)
+    Derived & SetLocalMRPConfig(const std::optional<ReliableMessageProtocolConfig> & config)
     {
         mLocalMRPConfig = config;
         return *reinterpret_cast<Derived *>(this);
     }
-    const Optional<ReliableMessageProtocolConfig> & GetLocalMRPConfig() const { return mLocalMRPConfig; }
-    Derived & SetTcpSupported(Optional<bool> tcpSupported)
+    const std::optional<ReliableMessageProtocolConfig> & GetLocalMRPConfig() const { return mLocalMRPConfig; }
+
+    Derived & SetTCPSupportModes(TCPModeAdvertise tcpSupportModes)
     {
-        mTcpSupported = tcpSupported;
+        mTcpSupportModes = tcpSupportModes;
         return *reinterpret_cast<Derived *>(this);
     }
-    Optional<bool> GetTcpSupported() const { return mTcpSupported; }
+    TCPModeAdvertise GetTCPSupportModes() const { return mTcpSupportModes; }
+
+    Derived & SetICDModeToAdvertise(ICDModeAdvertise operatingMode)
+    {
+        mICDModeAdvertise = operatingMode;
+        return *reinterpret_cast<Derived *>(this);
+    }
+    ICDModeAdvertise GetICDModeToAdvertise() const { return mICDModeAdvertise; }
 
 private:
     uint16_t mPort                   = CHIP_PORT;
@@ -107,8 +131,9 @@ private:
     bool mEnableIPv4                 = true;
     uint8_t mMacStorage[kMaxMacSize] = {};
     size_t mMacLength                = 0;
-    Optional<ReliableMessageProtocolConfig> mLocalMRPConfig;
-    Optional<bool> mTcpSupported;
+    std::optional<ReliableMessageProtocolConfig> mLocalMRPConfig;
+    TCPModeAdvertise mTcpSupportModes  = TCPModeAdvertise::kNone;
+    ICDModeAdvertise mICDModeAdvertise = ICDModeAdvertise::kNone;
 };
 
 /// Defines parameters required for advertising a CHIP node
@@ -159,19 +184,19 @@ public:
     }
     uint16_t GetLongDiscriminator() const { return mLongDiscriminator; }
 
-    CommissionAdvertisingParameters & SetVendorId(Optional<uint16_t> vendorId)
+    CommissionAdvertisingParameters & SetVendorId(std::optional<uint16_t> vendorId)
     {
         mVendorId = vendorId;
         return *this;
     }
-    Optional<uint16_t> GetVendorId() const { return mVendorId; }
+    std::optional<uint16_t> GetVendorId() const { return mVendorId; }
 
-    CommissionAdvertisingParameters & SetProductId(Optional<uint16_t> productId)
+    CommissionAdvertisingParameters & SetProductId(std::optional<uint16_t> productId)
     {
         mProductId = productId;
         return *this;
     }
-    Optional<uint16_t> GetProductId() const { return mProductId; }
+    std::optional<uint16_t> GetProductId() const { return mProductId; }
 
     CommissionAdvertisingParameters & SetCommissioningMode(CommissioningMode mode)
     {
@@ -180,18 +205,27 @@ public:
     }
     CommissioningMode GetCommissioningMode() const { return mCommissioningMode; }
 
-    CommissionAdvertisingParameters & SetDeviceType(Optional<uint32_t> deviceType)
+#if CHIP_DEVICE_CONFIG_ENABLE_JOINT_FABRIC
+    CommissionAdvertisingParameters & SetJointFabricMode(BitFlags<JointFabricMode> mode)
+    {
+        mJointFabricMode = mode;
+        return *this;
+    }
+    BitFlags<JointFabricMode> GetJointFabricMode() const { return mJointFabricMode; }
+#endif // CHIP_DEVICE_CONFIG_ENABLE_JOINT_FABRIC
+
+    CommissionAdvertisingParameters & SetDeviceType(std::optional<uint32_t> deviceType)
     {
         mDeviceType = deviceType;
         return *this;
     }
-    Optional<uint32_t> GetDeviceType() const { return mDeviceType; }
+    std::optional<uint32_t> GetDeviceType() const { return mDeviceType; }
 
-    CommissionAdvertisingParameters & SetDeviceName(Optional<const char *> deviceName)
+    CommissionAdvertisingParameters & SetDeviceName(std::optional<const char *> deviceName)
     {
-        if (deviceName.HasValue())
+        if (deviceName.has_value())
         {
-            Platform::CopyString(mDeviceName, sizeof(mDeviceName), deviceName.Value());
+            Platform::CopyString(mDeviceName, sizeof(mDeviceName), *deviceName);
             mDeviceNameHasValue = true;
         }
         else
@@ -200,16 +234,16 @@ public:
         }
         return *this;
     }
-    Optional<const char *> GetDeviceName() const
+    std::optional<const char *> GetDeviceName() const
     {
-        return mDeviceNameHasValue ? Optional<const char *>::Value(mDeviceName) : Optional<const char *>::Missing();
+        return mDeviceNameHasValue ? std::make_optional<const char *>(mDeviceName) : std::nullopt;
     }
 
-    CommissionAdvertisingParameters & SetRotatingDeviceId(Optional<const char *> rotatingId)
+    CommissionAdvertisingParameters & SetRotatingDeviceId(std::optional<const char *> rotatingId)
     {
-        if (rotatingId.HasValue())
+        if (rotatingId.has_value())
         {
-            Platform::CopyString(mRotatingId, sizeof(mRotatingId), rotatingId.Value());
+            Platform::CopyString(mRotatingId, sizeof(mRotatingId), *rotatingId);
             mRotatingIdHasValue = true;
         }
         else
@@ -218,16 +252,16 @@ public:
         }
         return *this;
     }
-    Optional<const char *> GetRotatingDeviceId() const
+    std::optional<const char *> GetRotatingDeviceId() const
     {
-        return mRotatingIdHasValue ? Optional<const char *>::Value(mRotatingId) : Optional<const char *>::Missing();
+        return mRotatingIdHasValue ? std::make_optional<const char *>(mRotatingId) : std::nullopt;
     }
 
-    CommissionAdvertisingParameters & SetPairingInstruction(Optional<const char *> pairingInstr)
+    CommissionAdvertisingParameters & SetPairingInstruction(std::optional<const char *> pairingInstr)
     {
-        if (pairingInstr.HasValue())
+        if (pairingInstr.has_value())
         {
-            Platform::CopyString(mPairingInstr, sizeof(mPairingInstr), pairingInstr.Value());
+            Platform::CopyString(mPairingInstr, sizeof(mPairingInstr), *pairingInstr);
             mPairingInstrHasValue = true;
         }
         else
@@ -236,17 +270,17 @@ public:
         }
         return *this;
     }
-    Optional<const char *> GetPairingInstruction() const
+    std::optional<const char *> GetPairingInstruction() const
     {
-        return mPairingInstrHasValue ? Optional<const char *>::Value(mPairingInstr) : Optional<const char *>::Missing();
+        return mPairingInstrHasValue ? std::make_optional<const char *>(mPairingInstr) : std::nullopt;
     }
 
-    CommissionAdvertisingParameters & SetPairingHint(Optional<uint16_t> pairingHint)
+    CommissionAdvertisingParameters & SetPairingHint(std::optional<uint16_t> pairingHint)
     {
         mPairingHint = pairingHint;
         return *this;
     }
-    Optional<uint16_t> GetPairingHint() const { return mPairingHint; }
+    std::optional<uint16_t> GetPairingHint() const { return mPairingHint; }
 
     CommissionAdvertisingParameters & SetCommissionAdvertiseMode(CommssionAdvertiseMode mode)
     {
@@ -255,15 +289,25 @@ public:
     }
     CommssionAdvertiseMode GetCommissionAdvertiseMode() const { return mMode; }
 
+    CommissionAdvertisingParameters & SetCommissionerPasscodeSupported(std::optional<bool> commissionerPasscodeSupported)
+    {
+        mCommissionerPasscodeSupported = commissionerPasscodeSupported;
+        return *this;
+    }
+    std::optional<bool> GetCommissionerPasscodeSupported() const { return mCommissionerPasscodeSupported; }
+
 private:
     uint8_t mShortDiscriminator          = 0;
     uint16_t mLongDiscriminator          = 0; // 12-bit according to spec
     CommssionAdvertiseMode mMode         = CommssionAdvertiseMode::kCommissionableNode;
     CommissioningMode mCommissioningMode = CommissioningMode::kEnabledBasic;
-    chip::Optional<uint16_t> mVendorId;
-    chip::Optional<uint16_t> mProductId;
-    chip::Optional<uint32_t> mDeviceType;
-    chip::Optional<uint16_t> mPairingHint;
+#if CHIP_DEVICE_CONFIG_ENABLE_JOINT_FABRIC
+    BitFlags<JointFabricMode> mJointFabricMode;
+#endif // CHIP_DEVICE_CONFIG_ENABLE_JOINT_FABRIC
+    std::optional<uint16_t> mVendorId;
+    std::optional<uint16_t> mProductId;
+    std::optional<uint32_t> mDeviceType;
+    std::optional<uint16_t> mPairingHint;
 
     char mDeviceName[kKeyDeviceNameMaxLength + 1];
     bool mDeviceNameHasValue = false;
@@ -273,6 +317,8 @@ private:
 
     char mPairingInstr[kKeyPairingInstructionMaxLength + 1];
     bool mPairingInstrHasValue = false;
+
+    std::optional<bool> mCommissionerPasscodeSupported;
 };
 
 /**
@@ -349,9 +395,28 @@ public:
      */
     virtual CHIP_ERROR UpdateCommissionableInstanceName() = 0;
 
-    /// Provides the system-wide implementation of the service advertiser
+    /**
+     * Returns the system-wide implementation of the service advertiser.
+     *
+     * The method returns a reference to the advertiser object configured by
+     * a user using the \c ServiceAdvertiser::SetInstance() method, or the
+     * default advertiser returned by the \c GetDefaultAdvertiser() function.
+     */
     static ServiceAdvertiser & Instance();
+
+    /**
+     * Sets the system-wide implementation of the service advertiser.
+     */
+    static void SetInstance(ServiceAdvertiser & advertiser);
+
+private:
+    static ServiceAdvertiser * sInstance;
 };
+
+/**
+ * Returns the default implementation of the service advertiser.
+ */
+extern ServiceAdvertiser & GetDefaultAdvertiser();
 
 } // namespace Dnssd
 } // namespace chip

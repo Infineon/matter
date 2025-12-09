@@ -36,6 +36,10 @@
 #include <pthread.h>
 #endif // CHIP_SYSTEM_CONFIG_POSIX_LOCKING
 
+#if CHIP_SYSTEM_CONFIG_THREADX_LOCKING
+#include "tx_api.h"
+#endif // CHIP_SYSTEM_CONFIG_THREADX_LOCKING
+
 #if CHIP_SYSTEM_CONFIG_FREERTOS_LOCKING
 #if defined(ESP_PLATFORM)
 #include "freertos/FreeRTOS.h"
@@ -112,9 +116,9 @@ public:
     Mutex() = default;
 
     static CHIP_ERROR Init(Mutex & aMutex);
-#if CHIP_SYSTEM_CONFIG_FREERTOS_LOCKING
+#if CHIP_SYSTEM_CONFIG_FREERTOS_LOCKING || CHIP_SYSTEM_CONFIG_THREADX_LOCKING
     inline bool isInitialized() { return mInitialized; }
-#endif // CHIP_SYSTEM_CONFIG_FREERTOS_LOCKING
+#endif // CHIP_SYSTEM_CONFIG_FREERTOS_LOCKING || CHIP_SYSTEM_CONFIG_THREADX_LOCKING
 
     void Lock() CHIP_ACQUIRE();   /**< Acquire the mutual exclusion lock, blocking the current thread indefinitely if necessary. */
     void Unlock() CHIP_RELEASE(); /**< Release the mutual exclusion lock (can block on some systems until scheduler completes). */
@@ -127,6 +131,11 @@ private:
 #if CHIP_SYSTEM_CONFIG_POSIX_LOCKING
     pthread_mutex_t mPOSIXMutex;
 #endif // CHIP_SYSTEM_CONFIG_POSIX_LOCKING
+
+#if CHIP_SYSTEM_CONFIG_THREADX_LOCKING
+    TX_MUTEX mThreadXMutex;
+    bool mInitialized = 0;
+#endif // CHIP_SYSTEM_CONFIG_THREADX_LOCKING
 
 #if CHIP_SYSTEM_CONFIG_FREERTOS_LOCKING
 #if (configSUPPORT_STATIC_ALLOCATION == 1)
@@ -179,6 +188,20 @@ inline void Mutex::Unlock(void)
     xSemaphoreGive(this->mFreeRTOSSemaphore);
 }
 #endif // CHIP_SYSTEM_CONFIG_FREERTOS_LOCKING
+
+#if CHIP_SYSTEM_CONFIG_THREADX_LOCKING
+inline void Mutex::Lock()
+{
+    tx_mutex_get(&mThreadXMutex, TX_WAIT_FOREVER);
+    return;
+}
+
+inline void Mutex::Unlock(void)
+{
+    tx_mutex_put(&mThreadXMutex);
+    return;
+}
+#endif // CHIP_SYSTEM_CONFIG_THREADX_LOCKING
 
 #if CHIP_SYSTEM_CONFIG_MBED_LOCKING
 inline CHIP_ERROR Mutex::Init(Mutex & aMutex)

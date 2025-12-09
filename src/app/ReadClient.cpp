@@ -33,6 +33,11 @@
 #include <messaging/ReliableMessageMgr.h>
 #include <messaging/ReliableMessageProtocolConfig.h>
 #include <platform/LockTracker.h>
+#include <tracing/metric_event.h>
+
+#include <app-common/zap-generated/cluster-objects.h>
+#include <app-common/zap-generated/ids/Attributes.h>
+#include <app-common/zap-generated/ids/Clusters.h>
 
 namespace chip {
 namespace app {
@@ -67,6 +72,7 @@ void ReadClient::ClearActiveSubscriptionState()
     mMaxInterval                  = 0;
     mSubscriptionId               = 0;
     mIsResubscriptionScheduled    = false;
+
     MoveToState(ClientState::Idle);
 }
 
@@ -130,6 +136,11 @@ uint32_t ReadClient::ComputeTimeTillNextSubscription()
         waitTimeInMsec    = minWaitTimeInMsec + (Crypto::GetRandU32() % (maxWaitTimeInMsec - minWaitTimeInMsec));
     }
 
+    if (mMinimalResubscribeDelay.count() > waitTimeInMsec)
+    {
+        waitTimeInMsec = mMinimalResubscribeDelay.count();
+    }
+
     return waitTimeInMsec;
 }
 
@@ -176,6 +187,11 @@ void ReadClient::Close(CHIP_ERROR aError, bool allowResubscription)
     }
     else
     {
+        if (IsAwaitingInitialReport() || IsAwaitingSubscribeResponse())
+        {
+            MATTER_LOG_METRIC_END(Tracing::kMetricDeviceSubscriptionSetup, aError);
+        }
+
         ClearActiveSubscriptionState();
         if (aError != CHIP_NO_ERROR)
         {
@@ -187,9 +203,18 @@ void ReadClient::Close(CHIP_ERROR aError, bool allowResubscription)
             if (allowResubscription &&
                 (mReadPrepareParams.mEventPathParamsListSize != 0 || mReadPrepareParams.mAttributePathParamsListSize != 0))
             {
+                CHIP_ERROR originalReason = aError;
+
                 aError = mpCallback.OnResubscriptionNeeded(this, aError);
                 if (aError == CHIP_NO_ERROR)
                 {
+                    return;
+                }
+                if (aError == CHIP_ERROR_LIT_SUBSCRIBE_INACTIVE_TIMEOUT)
+                {
+                    VerifyOrDie(originalReason == CHIP_ERROR_LIT_SUBSCRIBE_INACTIVE_TIMEOUT);
+                    ChipLogProgress(DataManagement, "ICD device is inactive mark subscription as InactiveICDSubscription");
+                    MoveToState(ClientState::InactiveICDSubscription);
                     return;
                 }
             }
@@ -223,6 +248,8 @@ const char * ReadClient::GetStateStr() const
         return "AwaitingSubscribeResponse";
     case ClientState::SubscriptionActive:
         return "SubscriptionActive";
+    case ClientState::InactiveICDSubscription:
+        return "InactiveICDSubscription";
     }
 #endif // CHIP_DETAIL_LOGGING
     return "N/A";
@@ -376,6 +403,11 @@ CHIP_ERROR ReadClient::BuildDataVersionFilterList(DataVersionFilterIBs::Builder 
                                                   const Span<DataVersionFilter> & aDataVersionFilters,
                                                   bool & aEncodedDataVersionList)
 {
+#if CHIP_PROGRESS_LOGGING
+    size_t encodedFilterCount    = 0;
+    size_t irrelevantFilterCount = 0;
+    size_t skippedFilterCount    = 0;
+#endif
     for (auto & filter : aDataVersionFilters)
     {
         VerifyOrReturnError(filter.IsValidDataVersionFilter(), CHIP_ERROR_INVALID_ARGUMENT);
@@ -393,18 +425,42 @@ CHIP_ERROR ReadClient::BuildDataVersionFilterList(DataVersionFilterIBs::Builder 
 
         if (!intersected)
         {
+#if CHIP_PROGRESS_LOGGING
+            ++irrelevantFilterCount;
+#endif
             continue;
         }
 
-        DataVersionFilterIB::Builder & filterIB = aDataVersionFilterIBsBuilder.CreateDataVersionFilter();
-        ReturnErrorOnFailure(aDataVersionFilterIBsBuilder.GetError());
-        ClusterPathIB::Builder & path = filterIB.CreatePath();
-        ReturnErrorOnFailure(filterIB.GetError());
-        ReturnErrorOnFailure(path.Endpoint(filter.mEndpointId).Cluster(filter.mClusterId).EndOfClusterPathIB());
-        VerifyOrReturnError(filter.mDataVersion.HasValue(), CHIP_ERROR_INVALID_ARGUMENT);
-        ReturnErrorOnFailure(filterIB.DataVersion(filter.mDataVersion.Value()).EndOfDataVersionFilterIB());
-        aEncodedDataVersionList = true;
+        TLV::TLVWriter backup;
+        aDataVersionFilterIBsBuilder.Checkpoint(backup);
+        CHIP_ERROR err = aDataVersionFilterIBsBuilder.EncodeDataVersionFilterIB(filter);
+        if (err == CHIP_NO_ERROR)
+        {
+#if CHIP_PROGRESS_LOGGING
+            ++encodedFilterCount;
+#endif
+            aEncodedDataVersionList = true;
+        }
+        else if (err == CHIP_ERROR_NO_MEMORY || err == CHIP_ERROR_BUFFER_TOO_SMALL)
+        {
+            // Packet is full, ignore the rest of the list
+            aDataVersionFilterIBsBuilder.Rollback(backup);
+#if CHIP_PROGRESS_LOGGING
+            ssize_t nonSkippedFilterCount = &filter - aDataVersionFilters.data();
+            skippedFilterCount            = aDataVersionFilters.size() - static_cast<size_t>(nonSkippedFilterCount);
+#endif // CHIP_PROGRESS_LOGGING
+            break;
+        }
+        else
+        {
+            return err;
+        }
     }
+
+    ChipLogProgress(DataManagement,
+                    "%lu data version filters provided, %lu not relevant, %lu encoded, %lu skipped due to lack of space",
+                    static_cast<unsigned long>(aDataVersionFilters.size()), static_cast<unsigned long>(irrelevantFilterCount),
+                    static_cast<unsigned long>(encodedFilterCount), static_cast<unsigned long>(skippedFilterCount));
     return CHIP_NO_ERROR;
 }
 
@@ -413,18 +469,66 @@ CHIP_ERROR ReadClient::GenerateDataVersionFilterList(DataVersionFilterIBs::Build
                                                      const Span<DataVersionFilter> & aDataVersionFilters,
                                                      bool & aEncodedDataVersionList)
 {
-    if (!aDataVersionFilters.empty())
+    // Give the callback a chance first, otherwise use the list we have, if any.
+    ReturnErrorOnFailure(
+        mpCallback.OnUpdateDataVersionFilterList(aDataVersionFilterIBsBuilder, aAttributePaths, aEncodedDataVersionList));
+
+    if (!aEncodedDataVersionList)
     {
         ReturnErrorOnFailure(BuildDataVersionFilterList(aDataVersionFilterIBsBuilder, aAttributePaths, aDataVersionFilters,
                                                         aEncodedDataVersionList));
     }
-    else
-    {
-        ReturnErrorOnFailure(
-            mpCallback.OnUpdateDataVersionFilterList(aDataVersionFilterIBsBuilder, aAttributePaths, aEncodedDataVersionList));
-    }
 
     return CHIP_NO_ERROR;
+}
+
+void ReadClient::OnActiveModeNotification()
+{
+    VerifyOrDie(mpImEngine->InActiveReadClientList(this));
+
+    // Note: this API only works when issuing subscription via SendAutoResubscribeRequest. When SendAutoResubscribeRequest is
+    // called, either mEventPathParamsListSize or mAttributePathParamsListSize is not 0.
+    VerifyOrReturn(mReadPrepareParams.mEventPathParamsListSize != 0 || mReadPrepareParams.mAttributePathParamsListSize != 0);
+
+    // When we reach here, the subscription definitely exceeded the liveness timeout. Just continue the unfinished resubscription
+    // logic in `OnLivenessTimeoutCallback`.
+    if (IsInactiveICDSubscription())
+    {
+        TriggerResubscriptionForLivenessTimeout(CHIP_ERROR_TIMEOUT);
+        return;
+    }
+
+    // If this API has been called, that means the subscription for this ReadClient is gone
+    // on the server side (because otherwise the server would not have checked in with us).
+    // Even if we think we have a live subscription, we are wrong, and should just forcibly time it
+    // out and schedule a new one.
+    if (!mIsResubscriptionScheduled)
+    {
+        // Closing will ultimately trigger ScheduleResubscription with the aReestablishCASE argument set to true, effectively
+        // rendering the session defunct.
+        Close(CHIP_ERROR_TIMEOUT);
+        return;
+    }
+
+    // If we have already detected subscription loss and are waiting to try to re-subscribe,
+    // now is a really good time to do it, since the server is listening.
+    TriggerResubscribeIfScheduled("check-in message");
+}
+
+void ReadClient::OnPeerTypeChange(PeerType aType)
+{
+    VerifyOrDie(mpImEngine->InActiveReadClientList(this));
+
+    mIsPeerLIT = (aType == PeerType::kLITICD);
+
+    ChipLogProgress(DataManagement, "Peer is now %s LIT ICD.", mIsPeerLIT ? "a" : "not a");
+
+    // If the peer is no longer LIT and we were waiting for a check-in to try to resubscribe,
+    // just try to resubscribe now, because a SIT is not going to send a check-in.
+    if (!mIsPeerLIT && IsInactiveICDSubscription())
+    {
+        TriggerResubscriptionForLivenessTimeout(CHIP_ERROR_TIMEOUT);
+    }
 }
 
 CHIP_ERROR ReadClient::OnMessageReceived(Messaging::ExchangeContext * apExchangeContext, const PayloadHeader & aPayloadHeader,
@@ -432,7 +536,7 @@ CHIP_ERROR ReadClient::OnMessageReceived(Messaging::ExchangeContext * apExchange
 {
     CHIP_ERROR err = CHIP_NO_ERROR;
     Status status  = Status::InvalidAction;
-    VerifyOrExit(!IsIdle(), err = CHIP_ERROR_INCORRECT_STATE);
+    VerifyOrExit(!IsIdle() && !IsInactiveICDSubscription(), err = CHIP_ERROR_INCORRECT_STATE);
 
     if (aPayloadHeader.HasMessageType(Protocols::InteractionModel::MsgType::ReportData))
     {
@@ -443,6 +547,7 @@ CHIP_ERROR ReadClient::OnMessageReceived(Messaging::ExchangeContext * apExchange
         ChipLogProgress(DataManagement, "SubscribeResponse is received");
         VerifyOrExit(apExchangeContext == mExchange.Get(), err = CHIP_ERROR_INCORRECT_STATE);
         err = ProcessSubscribeResponse(std::move(aPayload));
+        MATTER_LOG_METRIC_END(Tracing::kMetricDeviceSubscriptionSetup, err);
     }
     else if (aPayloadHeader.HasMessageType(Protocols::InteractionModel::MsgType::StatusResponse))
     {
@@ -617,6 +722,7 @@ exit:
             // a subscription and have a valid value for mMaxInterval which the function
             // relies on.
             //
+            mpCallback.NotifySubscriptionStillActive(*this);
             err = RefreshLivenessCheckTimer();
         }
     }
@@ -635,15 +741,42 @@ void ReadClient::OnResponseTimeout(Messaging::ExchangeContext * apExchangeContex
 {
     ChipLogError(DataManagement, "Time out! failed to receive report data from Exchange: " ChipLogFormatExchange,
                  ChipLogValueExchange(apExchangeContext));
+
     Close(CHIP_ERROR_TIMEOUT);
+}
+
+CHIP_ERROR ReadClient::ReadICDOperatingModeFromAttributeDataIB(TLV::TLVReader && aReader, PeerType & aType)
+{
+    Clusters::IcdManagement::Attributes::OperatingMode::TypeInfo::DecodableType operatingMode;
+
+    CHIP_ERROR err = DataModel::Decode(aReader, operatingMode);
+    ReturnErrorOnFailure(err);
+
+    switch (operatingMode)
+    {
+    case Clusters::IcdManagement::OperatingModeEnum::kSit:
+        aType = PeerType::kNormal;
+        break;
+    case Clusters::IcdManagement::OperatingModeEnum::kLit:
+        aType = PeerType::kLITICD;
+        break;
+    default:
+        err = CHIP_ERROR_INVALID_ARGUMENT;
+        break;
+    }
+
+    return err;
 }
 
 CHIP_ERROR ReadClient::ProcessAttributePath(AttributePathIB::Parser & aAttributePathParser,
                                             ConcreteDataAttributePath & aAttributePath)
 {
+    // The ReportData must contain a concrete attribute path.  Don't validate ID
+    // ranges here, so we can tell apart "malformed data" and "out of range
+    // IDs".
     CHIP_ERROR err = CHIP_NO_ERROR;
     // The ReportData must contain a concrete attribute path
-    err = aAttributePathParser.GetConcreteAttributePath(aAttributePath);
+    err = aAttributePathParser.GetConcreteAttributePath(aAttributePath, AttributePathIB::ValidateIdRanges::kNo);
     VerifyOrReturnError(err == CHIP_NO_ERROR, CHIP_ERROR_IM_MALFORMED_ATTRIBUTE_PATH_IB);
     return CHIP_NO_ERROR;
 }
@@ -679,6 +812,17 @@ CHIP_ERROR ReadClient::ProcessAttributeReportIBs(TLV::TLVReader & aAttributeRepo
             StatusIB::Parser errorStatus;
             ReturnErrorOnFailure(status.GetPath(&path));
             ReturnErrorOnFailure(ProcessAttributePath(path, attributePath));
+            if (!attributePath.IsValid())
+            {
+                // Don't fail the entire read or subscription when there is an
+                // out-of-range ID.  Just skip that one AttributeReportIB.
+                ChipLogError(DataManagement,
+                             "Skipping AttributeStatusIB with out-of-range IDs: (%d, " ChipLogFormatMEI ", " ChipLogFormatMEI ") ",
+                             attributePath.mEndpointId, ChipLogValueMEI(attributePath.mClusterId),
+                             ChipLogValueMEI(attributePath.mAttributeId));
+                continue;
+            }
+
             ReturnErrorOnFailure(status.GetErrorStatus(&errorStatus));
             ReturnErrorOnFailure(errorStatus.DecodeStatusIB(statusIB));
             NoteReportingData();
@@ -689,6 +833,17 @@ CHIP_ERROR ReadClient::ProcessAttributeReportIBs(TLV::TLVReader & aAttributeRepo
             ReturnErrorOnFailure(report.GetAttributeData(&data));
             ReturnErrorOnFailure(data.GetPath(&path));
             ReturnErrorOnFailure(ProcessAttributePath(path, attributePath));
+            if (!attributePath.IsValid())
+            {
+                // Don't fail the entire read or subscription when there is an
+                // out-of-range ID.  Just skip that one AttributeReportIB.
+                ChipLogError(DataManagement,
+                             "Skipping AttributeDataIB  with out-of-range IDs: (%d, " ChipLogFormatMEI ", " ChipLogFormatMEI ") ",
+                             attributePath.mEndpointId, ChipLogValueMEI(attributePath.mClusterId),
+                             ChipLogValueMEI(attributePath.mAttributeId));
+                continue;
+            }
+
             DataVersion version = 0;
             ReturnErrorOnFailure(data.GetDataVersion(&version));
             attributePath.mDataVersion.SetValue(version);
@@ -705,6 +860,25 @@ CHIP_ERROR ReadClient::ProcessAttributeReportIBs(TLV::TLVReader & aAttributeRepo
             if (!attributePath.IsListOperation() && dataReader.GetType() == TLV::kTLVType_Array)
             {
                 attributePath.mListOp = ConcreteDataAttributePath::ListOperation::ReplaceAll;
+            }
+
+            if (attributePath.MatchesConcreteAttributePath(ConcreteAttributePath(
+                    kRootEndpointId, Clusters::IcdManagement::Id, Clusters::IcdManagement::Attributes::OperatingMode::Id)))
+            {
+                PeerType peerType;
+                TLV::TLVReader operatingModeTlvReader;
+                operatingModeTlvReader.Init(dataReader);
+                if (CHIP_NO_ERROR == ReadICDOperatingModeFromAttributeDataIB(std::move(operatingModeTlvReader), peerType))
+                {
+                    // It is safe to call `OnPeerTypeChange` since we are in the middle of parsing the attribute data, And
+                    // the subscription should be active so `OnActiveModeNotification` is a no-op in this case.
+                    InteractionModelEngine::GetInstance()->OnPeerTypeChange(mPeer, peerType);
+                }
+                else
+                {
+                    ChipLogError(DataManagement, "Failed to get ICD state from attribute data with error'%" CHIP_ERROR_FORMAT "'",
+                                 err.Format());
+                }
             }
 
             NoteReportingData();
@@ -822,22 +996,29 @@ CHIP_ERROR ReadClient::ComputeLivenessCheckTimerTimeout(System::Clock::Timeout *
 
     //
     // To calculate the duration we're willing to wait for a report to come to us, we take into account the maximum interval of
-    // the subscription AND the time it takes for the report to make it to us in the worst case. This latter bit involves
-    // computing the Ack timeout from the publisher for the ReportData message being sent to us using our IDLE interval as the
-    // basis for that computation.
+    // the subscription AND the time it takes for the report to make it to us in the worst case.
     //
-    // Make sure to use the retransmission computation that includes backoff.  For purposes of that computation, treat us as
-    // active now (since we are right now sending/receiving messages), and use the default "how long are we guaranteed to stay
-    // active" threshold for now.
+    // We have no way to estimate what the network latency will be, but we do know the other side will time out its ReportData
+    // after its computed round-trip timeout plus the processing time it gives us (app::kExpectedIMProcessingTime).  Once it
+    // times out, assuming it sent the report at all, there's no point in us thinking we still have a subscription.
     //
-    // TODO: We need to find a good home for this logic that will correctly compute this based on transport. For now, this will
-    // suffice since we don't use TCP as a transport currently and subscriptions over BLE aren't really a thing.
+    // We can't use ComputeRoundTripTimeout() on the session for two reasons: we want the roundtrip timeout from the point of
+    // view of the peer, not us, and we want to start off with the assumption the peer will likely have, which is that we are
+    // idle, whereas ComputeRoundTripTimeout() uses the current activity state of the peer.
     //
-    const auto & ourMrpConfig = GetDefaultMRPConfig();
-    auto publisherTransmissionTimeout =
-        GetRetransmissionTimeout(ourMrpConfig.mActiveRetransTimeout, ourMrpConfig.mIdleRetransTimeout,
-                                 System::SystemClock().GetMonotonicTimestamp(), ourMrpConfig.mActiveThresholdTime);
-    *aTimeout = System::Clock::Seconds16(mMaxInterval) + publisherTransmissionTimeout;
+    // So recompute the round-trip timeout directly.  Assume MRP, since in practice that is likely what is happening.
+    auto & peerMRPConfig = mReadPrepareParams.mSessionHolder->GetRemoteMRPConfig();
+    // Peer will assume we are idle (hence we pass kZero to GetMessageReceiptTimeout()), but will assume we treat it as active
+    // for the response, so to match the retransmission timeout computation for the message back to the peer, we should treat
+    // it as active and handling non-initial message, isFirstMessageOnExchange needs to be set as false for
+    // GetRetransmissionTimeout.
+    auto roundTripTimeout =
+        mReadPrepareParams.mSessionHolder->GetMessageReceiptTimeout(System::Clock::kZero, true /*isFirstMessageOnExchange*/) +
+        kExpectedIMProcessingTime +
+        GetRetransmissionTimeout(peerMRPConfig.mActiveRetransTimeout, peerMRPConfig.mIdleRetransTimeout,
+                                 System::SystemClock().GetMonotonicTimestamp(), peerMRPConfig.mActiveThresholdTime,
+                                 false /*isFirstMessageOnExchange*/);
+    *aTimeout = System::Clock::Seconds16(mMaxInterval) + roundTripTimeout;
     return CHIP_NO_ERROR;
 }
 
@@ -858,6 +1039,10 @@ void ReadClient::OnLivenessTimeoutCallback(System::Layer * apSystemLayer, void *
 {
     ReadClient * const _this = reinterpret_cast<ReadClient *>(apAppState);
 
+    // TODO: add a more specific error here for liveness timeout failure to distinguish between other classes of timeouts (i.e
+    // response timeouts).
+    CHIP_ERROR subscriptionTerminationCause = CHIP_ERROR_TIMEOUT;
+
     //
     // Might as well try to see if this instance exists in the tracked list in the IM.
     // This might blow-up if either the client has since been free'ed (use-after-free), or if the engine has since
@@ -869,32 +1054,43 @@ void ReadClient::OnLivenessTimeoutCallback(System::Layer * apSystemLayer, void *
                  "Subscription Liveness timeout with SubscriptionID = 0x%08" PRIx32 ", Peer = %02x:" ChipLogFormatX64,
                  _this->mSubscriptionId, _this->GetFabricIndex(), ChipLogValueX64(_this->GetPeerNodeId()));
 
+    // If subscription client is able to handle check-in messages and peer operation mode is LIT,
+    // use CHIP_ERROR_LIT_SUBSCRIBE_INACTIVE_TIMEOUT as subscriptionTerminationCause.
+    // This will cause us to wait for a check-in message before trying to re-subscribe, instead of trying
+    // (and probably failing, because we are dealing with a LIT ICD) off a timer.
+    if (_this->mIsPeerLIT && _this->mReadPrepareParams.mRegisteredCheckInToken)
+    {
+        subscriptionTerminationCause = CHIP_ERROR_LIT_SUBSCRIBE_INACTIVE_TIMEOUT;
+    }
+
+    _this->TriggerResubscriptionForLivenessTimeout(subscriptionTerminationCause);
+}
+
+void ReadClient::TriggerResubscriptionForLivenessTimeout(CHIP_ERROR aReason)
+{
     // We didn't get a message from the server on time; it's possible that it no
     // longer has a useful CASE session to us.  Mark defunct all sessions that
     // have not seen peer activity in at least as long as our session.
-    const auto & holder = _this->mReadPrepareParams.mSessionHolder;
+    const auto & holder = mReadPrepareParams.mSessionHolder;
     if (holder)
     {
         System::Clock::Timestamp lastPeerActivity = holder->AsSecureSession()->GetLastPeerActivityTime();
-        _this->mpImEngine->GetExchangeManager()->GetSessionManager()->ForEachMatchingSession(
-            _this->mPeer, [&lastPeerActivity](auto * session) {
-                if (!session->IsCASESession())
-                {
-                    return;
-                }
+        mpImEngine->GetExchangeManager()->GetSessionManager()->ForEachMatchingSession(mPeer, [&lastPeerActivity](auto * session) {
+            if (!session->IsCASESession())
+            {
+                return;
+            }
 
-                if (session->GetLastPeerActivityTime() > lastPeerActivity)
-                {
-                    return;
-                }
+            if (session->GetLastPeerActivityTime() > lastPeerActivity)
+            {
+                return;
+            }
 
-                session->MarkAsDefunct();
-            });
+            session->MarkAsDefunct();
+        });
     }
 
-    // TODO: add a more specific error here for liveness timeout failure to distinguish between other classes of timeouts (i.e
-    // response timeouts).
-    _this->Close(CHIP_ERROR_TIMEOUT);
+    Close(aReason);
 }
 
 CHIP_ERROR ReadClient::ProcessSubscribeResponse(System::PacketBufferHandle && aPayload)
@@ -914,10 +1110,14 @@ CHIP_ERROR ReadClient::ProcessSubscribeResponse(System::PacketBufferHandle && aP
     VerifyOrReturnError(IsMatchingSubscriptionId(subscriptionId), CHIP_ERROR_INVALID_SUBSCRIPTION);
     ReturnErrorOnFailure(subscribeResponse.GetMaxInterval(&mMaxInterval));
 
+#if CHIP_PROGRESS_LOGGING
+    auto duration = System::Clock::Milliseconds32(System::SystemClock().GetMonotonicTimestamp() - mSubscribeRequestTime);
+#endif
     ChipLogProgress(DataManagement,
-                    "Subscription established with SubscriptionID = 0x%08" PRIx32 " MinInterval = %u"
+                    "Subscription established in %" PRIu32 "ms with SubscriptionID = 0x%08" PRIx32 " MinInterval = %u"
                     "s MaxInterval = %us Peer = %02x:" ChipLogFormatX64,
-                    mSubscriptionId, mMinIntervalFloorSeconds, mMaxInterval, GetFabricIndex(), ChipLogValueX64(GetPeerNodeId()));
+                    duration.count(), mSubscriptionId, mMinIntervalFloorSeconds, mMaxInterval, GetFabricIndex(),
+                    ChipLogValueX64(GetPeerNodeId()));
 
     ReturnErrorOnFailure(subscribeResponse.ExitContainer());
 
@@ -934,6 +1134,10 @@ CHIP_ERROR ReadClient::ProcessSubscribeResponse(System::PacketBufferHandle && aP
 
 CHIP_ERROR ReadClient::SendAutoResubscribeRequest(ReadPrepareParams && aReadPrepareParams)
 {
+    // Make sure we don't use minimal resubscribe delays from previous attempts
+    // for this one.
+    mMinimalResubscribeDelay = System::Clock::kZero;
+
     mReadPrepareParams = std::move(aReadPrepareParams);
     CHIP_ERROR err     = SendSubscribeRequest(mReadPrepareParams);
     if (err != CHIP_NO_ERROR)
@@ -961,16 +1165,36 @@ CHIP_ERROR ReadClient::SendSubscribeRequest(const ReadPrepareParams & aReadPrepa
     VerifyOrReturnError(aReadPrepareParams.mMinIntervalFloorSeconds <= aReadPrepareParams.mMaxIntervalCeilingSeconds,
                         CHIP_ERROR_INVALID_ARGUMENT);
 
-    return SendSubscribeRequestImpl(aReadPrepareParams);
+    auto err = SendSubscribeRequestImpl(aReadPrepareParams);
+    if (CHIP_NO_ERROR != err)
+    {
+        MATTER_LOG_METRIC_END(Tracing::kMetricDeviceSubscriptionSetup, err);
+    }
+    return err;
 }
 
 CHIP_ERROR ReadClient::SendSubscribeRequestImpl(const ReadPrepareParams & aReadPrepareParams)
 {
+    MATTER_LOG_METRIC_BEGIN(Tracing::kMetricDeviceSubscriptionSetup);
+
+#if CHIP_PROGRESS_LOGGING
+    mSubscribeRequestTime = System::SystemClock().GetMonotonicTimestamp();
+#endif
+
     VerifyOrReturnError(ClientState::Idle == mState, CHIP_ERROR_INCORRECT_STATE);
 
     if (&aReadPrepareParams != &mReadPrepareParams)
     {
         mReadPrepareParams.mSessionHolder = aReadPrepareParams.mSessionHolder;
+    }
+
+    mIsPeerLIT                                 = aReadPrepareParams.mIsPeerLIT;
+    mReadPrepareParams.mRegisteredCheckInToken = aReadPrepareParams.mRegisteredCheckInToken;
+
+    if (aReadPrepareParams.mRegisteredCheckInToken)
+    {
+        ChipLogProgress(DataManagement, "ICD Check-In token has been registered in peer device " ChipLogFormatScopedNodeId,
+                        ChipLogValueScopedNodeId(mPeer));
     }
 
     mMinIntervalFloorSeconds = aReadPrepareParams.mMinIntervalFloorSeconds;
@@ -1070,6 +1294,7 @@ CHIP_ERROR ReadClient::SendSubscribeRequestImpl(const ReadPrepareParams & aReadP
                                                 Messaging::SendFlags(Messaging::SendMessageFlags::kExpectResponse)));
 
     mPeer = aReadPrepareParams.mSessionHolder->AsSecureSession()->GetPeer();
+
     MoveToState(ClientState::AwaitingInitialReport);
 
     return CHIP_NO_ERROR;
@@ -1077,6 +1302,12 @@ CHIP_ERROR ReadClient::SendSubscribeRequestImpl(const ReadPrepareParams & aReadP
 
 CHIP_ERROR ReadClient::DefaultResubscribePolicy(CHIP_ERROR aTerminationCause)
 {
+    if (aTerminationCause == CHIP_ERROR_LIT_SUBSCRIBE_INACTIVE_TIMEOUT)
+    {
+        ChipLogProgress(DataManagement, "ICD device is inactive, skipping scheduling resubscribe within DefaultResubscribePolicy");
+        return CHIP_ERROR_LIT_SUBSCRIBE_INACTIVE_TIMEOUT;
+    }
+
     VerifyOrReturnError(IsIdle(), CHIP_ERROR_INCORRECT_STATE);
 
     auto timeTillNextResubscription = ComputeTimeTillNextSubscription();
@@ -1085,8 +1316,7 @@ CHIP_ERROR ReadClient::DefaultResubscribePolicy(CHIP_ERROR aTerminationCause)
                     "ms due to error %" CHIP_ERROR_FORMAT,
                     GetFabricIndex(), ChipLogValueX64(GetPeerNodeId()), mNumRetries, timeTillNextResubscription,
                     aTerminationCause.Format());
-    ReturnErrorOnFailure(ScheduleResubscription(timeTillNextResubscription, NullOptional, aTerminationCause == CHIP_ERROR_TIMEOUT));
-    return CHIP_NO_ERROR;
+    return ScheduleResubscription(timeTillNextResubscription, NullOptional, aTerminationCause == CHIP_ERROR_TIMEOUT);
 }
 
 void ReadClient::HandleDeviceConnected(void * context, Messaging::ExchangeManager & exchangeMgr,
@@ -1108,14 +1338,28 @@ void ReadClient::HandleDeviceConnected(void * context, Messaging::ExchangeManage
     }
 }
 
-void ReadClient::HandleDeviceConnectionFailure(void * context, const ScopedNodeId & peerId, CHIP_ERROR err)
+void ReadClient::HandleDeviceConnectionFailure(void * context, const OperationalSessionSetup::ConnectionFailureInfo & failureInfo)
 {
     ReadClient * const _this = static_cast<ReadClient *>(context);
     VerifyOrDie(_this != nullptr);
 
-    ChipLogError(DataManagement, "Failed to establish CASE for re-subscription with error '%" CHIP_ERROR_FORMAT "'", err.Format());
+    ChipLogError(DataManagement, "Failed to establish CASE for re-subscription with error '%" CHIP_ERROR_FORMAT "'",
+                 failureInfo.error.Format());
 
-    _this->Close(err);
+#if CHIP_CONFIG_ENABLE_BUSY_HANDLING_FOR_OPERATIONAL_SESSION_SETUP
+#if CHIP_DETAIL_LOGGING
+    if (failureInfo.requestedBusyDelay.HasValue())
+    {
+        ChipLogDetail(DataManagement, "Will delay resubscription by %u ms due to BUSY response",
+                      failureInfo.requestedBusyDelay.Value().count());
+    }
+#endif // CHIP_DETAIL_LOGGING
+    _this->mMinimalResubscribeDelay = failureInfo.requestedBusyDelay.ValueOr(System::Clock::kZero);
+#else
+    _this->mMinimalResubscribeDelay = System::Clock::kZero;
+#endif // CHIP_CONFIG_ENABLE_BUSY_HANDLING_FOR_OPERATIONAL_SESSION_SETUP
+
+    _this->Close(failureInfo.error);
 }
 
 void ReadClient::OnResubscribeTimerCallback(System::Layer * /* If this starts being used, fix callers that pass nullptr */,
@@ -1200,16 +1444,18 @@ CHIP_ERROR ReadClient::GetMinEventNumber(const ReadPrepareParams & aReadPrepareP
     return CHIP_NO_ERROR;
 }
 
-void ReadClient::TriggerResubscribeIfScheduled(const char * reason)
+bool ReadClient::TriggerResubscribeIfScheduled(const char * reason)
 {
     if (!mIsResubscriptionScheduled)
     {
-        return;
+        return false;
     }
 
     ChipLogDetail(DataManagement, "ReadClient[%p] triggering resubscribe, reason: %s", this, reason);
     CancelResubscribeTimer();
     OnResubscribeTimerCallback(nullptr, this);
+
+    return true;
 }
 
 Optional<System::Clock::Timeout> ReadClient::GetSubscriptionTimeout()

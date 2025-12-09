@@ -148,13 +148,6 @@ enum PublicEventTypes
     kTimeSyncChange,
 
     /**
-     * SED Interval Change
-     *
-     * Signals a change to the sleepy end device interval.
-     */
-    kICDPollingIntervalChange,
-
-    /**
      * CHIPoBLE Connection Established
      *
      * Signals that an external entity has established a new CHIPoBLE connection with the device.
@@ -167,6 +160,19 @@ enum PublicEventTypes
      * Signals that an external entity has closed existing CHIPoBLE connection with the device.
      */
     kCHIPoBLEConnectionClosed,
+
+    /**
+     * Request BLE connections to be closed.
+     * This is used in the supportsConcurrentConnection = False case.
+     */
+    kCloseAllBleConnections,
+
+    /**
+     * When supportsConcurrentConnection = False, the ConnectNetwork command cannot start until
+     * the BLE device is closed and the Operation Network device (e.g. WiFi) has been started.
+     */
+    kWiFiDeviceAvailable,
+    kOperationalNetworkStarted,
 
     /**
      * Thread State Change
@@ -239,6 +245,21 @@ enum PublicEventTypes
      * sending messages to other nodes.
      */
     kServerReady,
+
+    /**
+     * Signals that BLE is deinitialized.
+     */
+    kBLEDeinitialized,
+
+    /**
+     * Signals that secure session is established.
+     */
+    kSecureSessionEstablished,
+
+    /**
+     * Signals that factory reset has started.
+     */
+    kFactoryReset,
 };
 
 /**
@@ -258,8 +279,18 @@ enum InternalEventTypes
     kCHIPoBLEUnsubscribe,
     kCHIPoBLEWriteReceived,
     kCHIPoBLEIndicateConfirm,
+
+    /**
+     * Post this event in case of a BLE connection error. This event should be posted
+     * if the BLE central disconnects without unsubscribing from the BLE characteristic.
+     * This event should populate CHIPoBLEConnectionError structure.
+     */
     kCHIPoBLEConnectionError,
-    kCHIPoBLENotifyConfirm
+    kCHIPoBLENotifyConfirm,
+    kCHIPoWiFiPAFReceived,
+    kCHIPoWiFiPAFConnected,
+    kCHIPoWiFiPAFCancelConnect,
+    kCHIPoWiFiPAFWriteDone,
 };
 
 static_assert(kEventTypeNotSet == 0, "kEventTypeNotSet must be defined as 0");
@@ -357,12 +388,19 @@ typedef void (*AsyncWorkFunct)(intptr_t arg);
 #include CHIPDEVICEPLATFORMEVENT_HEADER
 #endif // defined(CHIP_DEVICE_LAYER_TARGET)
 
-#include <ble/BleConfig.h>
+#if CONFIG_NETWORK_LAYER_BLE
+#include <ble/Ble.h>
+#endif
+
 #include <inet/InetInterface.h>
 #include <lib/support/LambdaBridge.h>
 #include <system/SystemEvent.h>
 #include <system/SystemLayer.h>
 #include <system/SystemPacketBuffer.h>
+
+#if CHIP_DEVICE_CONFIG_ENABLE_WIFIPAF
+#include <wifipaf/WiFiPAFRole.h>
+#endif // CHIP_DEVICE_CONFIG_ENABLE_WIFIPAF
 
 namespace chip {
 namespace DeviceLayer {
@@ -443,6 +481,7 @@ struct ChipDeviceEvent final
             uint8_t SessionType;
             bool IsCommissioner;
         } SessionEstablished;
+#if CONFIG_NETWORK_LAYER_BLE && BLE_USES_DEVICE_EVENTS
         struct
         {
             BLE_CONNECTION_OBJECT ConId;
@@ -469,6 +508,15 @@ struct ChipDeviceEvent final
         {
             BLE_CONNECTION_OBJECT ConId;
         } CHIPoBLENotifyConfirm;
+#endif // CONFIG_NETWORK_LAYER_BLE && BLE_USES_DEVICE_EVENTS
+#if CHIP_DEVICE_CONFIG_ENABLE_WIFIPAF
+        struct
+        {
+            chip::System::PacketBuffer * Data;
+            chip::WiFiPAF::WiFiPAFSession SessionInfo;
+            bool result;
+        } CHIPoWiFiPAFReceived;
+#endif
         struct
         {
             bool RoleChanged : 1;
@@ -504,17 +552,9 @@ struct ChipDeviceEvent final
             FabricIndex fabricIndex;
             bool addNocCommandHasBeenInvoked;
             bool updateNocCommandHasBeenInvoked;
+            bool updateTermsAndConditionsHasBeenInvoked;
+            bool setVidVerificationStatementHasBeenInvoked;
         } FailSafeTimerExpired;
-
-        struct
-        {
-            bool armed;
-        } FailSafeState;
-
-        struct
-        {
-            bool open;
-        } CommissioningWindowStatus;
 
         struct
         {
@@ -526,9 +566,17 @@ struct ChipDeviceEvent final
         {
             OtaState newState;
         } OtaStateChanged;
+
+        struct
+        {
+            uint64_t PeerNodeId;
+            uint8_t FabricIndex;
+            uint8_t SecureSessionType;
+            uint8_t TransportType;
+            uint16_t LocalSessionId;
+        } SecureSessionEstablished;
     };
 
-    void Clear() { memset(this, 0, sizeof(*this)); }
     bool IsPublic() const { return DeviceEventType::IsPublic(Type); }
     bool IsInternal() const { return DeviceEventType::IsInternal(Type); }
     bool IsPlatformSpecific() const { return DeviceEventType::IsPlatformSpecific(Type); }

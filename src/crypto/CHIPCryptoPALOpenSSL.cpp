@@ -204,7 +204,7 @@ CHIP_ERROR AES_CCM_encrypt(const uint8_t * plaintext, size_t plaintext_length, c
 #if CHIP_CRYPTO_BORINGSSL
     aead = EVP_aead_aes_128_ccm_matter();
 
-    context = EVP_AEAD_CTX_new(aead, key.As<Aes128KeyByteArray>(), sizeof(Aes128KeyByteArray), tag_length);
+    context = EVP_AEAD_CTX_new(aead, key.As<Symmetric128BitsKeyByteArray>(), sizeof(Symmetric128BitsKeyByteArray), tag_length);
     VerifyOrExit(context != nullptr, error = CHIP_ERROR_NO_MEMORY);
 
     result = EVP_AEAD_CTX_seal_scatter(context, ciphertext, tag, &written_tag_len, tag_length, nonce, nonce_length, plaintext,
@@ -231,8 +231,8 @@ CHIP_ERROR AES_CCM_encrypt(const uint8_t * plaintext, size_t plaintext_length, c
     VerifyOrExit(result == 1, error = CHIP_ERROR_INTERNAL);
 
     // Pass in key + nonce
-    static_assert(kAES_CCM128_Key_Length == sizeof(Aes128KeyByteArray), "Unexpected key length");
-    result = EVP_EncryptInit_ex(context, nullptr, nullptr, key.As<Aes128KeyByteArray>(), Uint8::to_const_uchar(nonce));
+    static_assert(kAES_CCM128_Key_Length == sizeof(Symmetric128BitsKeyByteArray), "Unexpected key length");
+    result = EVP_EncryptInit_ex(context, nullptr, nullptr, key.As<Symmetric128BitsKeyByteArray>(), Uint8::to_const_uchar(nonce));
     VerifyOrExit(result == 1, error = CHIP_ERROR_INTERNAL);
 
     // Pass in plain text length
@@ -336,7 +336,7 @@ CHIP_ERROR AES_CCM_decrypt(const uint8_t * ciphertext, size_t ciphertext_length,
 #if CHIP_CRYPTO_BORINGSSL
     aead = EVP_aead_aes_128_ccm_matter();
 
-    context = EVP_AEAD_CTX_new(aead, key.As<Aes128KeyByteArray>(), sizeof(Aes128KeyByteArray), tag_length);
+    context = EVP_AEAD_CTX_new(aead, key.As<Symmetric128BitsKeyByteArray>(), sizeof(Symmetric128BitsKeyByteArray), tag_length);
     VerifyOrExit(context != nullptr, error = CHIP_ERROR_NO_MEMORY);
 
     result = EVP_AEAD_CTX_open_gather(context, plaintext, nonce, nonce_length, ciphertext, ciphertext_length, tag, tag_length, aad,
@@ -366,8 +366,8 @@ CHIP_ERROR AES_CCM_decrypt(const uint8_t * ciphertext, size_t ciphertext_length,
     VerifyOrExit(result == 1, error = CHIP_ERROR_INTERNAL);
 
     // Pass in key + nonce
-    static_assert(kAES_CCM128_Key_Length == sizeof(Aes128KeyByteArray), "Unexpected key length");
-    result = EVP_DecryptInit_ex(context, nullptr, nullptr, key.As<Aes128KeyByteArray>(), Uint8::to_const_uchar(nonce));
+    static_assert(kAES_CCM128_Key_Length == sizeof(Symmetric128BitsKeyByteArray), "Unexpected key length");
+    result = EVP_DecryptInit_ex(context, nullptr, nullptr, key.As<Symmetric128BitsKeyByteArray>(), Uint8::to_const_uchar(nonce));
     VerifyOrExit(result == 1, error = CHIP_ERROR_INTERNAL);
 
     // Pass in cipher text length
@@ -433,36 +433,72 @@ CHIP_ERROR Hash_SHA1(const uint8_t * data, const size_t data_length, uint8_t * o
     return CHIP_NO_ERROR;
 }
 
-Hash_SHA256_stream::Hash_SHA256_stream() {}
+// For OpenSSL, we store a pointer to the digest context (EVP_MD_CTX) since EVP_MD_CTX is Opaque.
+static_assert(kMAX_Hash_SHA256_Context_Size >= sizeof(void *),
+              "kMAX_Hash_SHA256_Context_Size needs to at least be able to store a pointer");
+
+// Storing a pointer to EVP_MD_CTX in HashSHA256OpaqueContext instead of the actual EVP_MD_CTX structure, as EVP_MD_CTX was made
+// opaque by OpenSSL and is dynamically allocated.
+static inline void set_inner_hash_evp_md_ctx(HashSHA256OpaqueContext * context, EVP_MD_CTX * evp_ctx)
+{
+    *SafePointerCast<EVP_MD_CTX **>(context) = evp_ctx;
+}
+
+static inline EVP_MD_CTX * to_inner_hash_evp_md_ctx(HashSHA256OpaqueContext * context)
+{
+    return *SafePointerCast<EVP_MD_CTX **>(context);
+}
+
+Hash_SHA256_stream::Hash_SHA256_stream()
+{
+    set_inner_hash_evp_md_ctx(&mContext, nullptr);
+}
 
 Hash_SHA256_stream::~Hash_SHA256_stream()
 {
     Clear();
 }
 
-static_assert(kMAX_Hash_SHA256_Context_Size >= sizeof(SHA256_CTX),
-              "kMAX_Hash_SHA256_Context_Size is too small for the size of underlying SHA256_CTX");
-
-static inline SHA256_CTX * to_inner_hash_sha256_context(HashSHA256OpaqueContext * context)
-{
-    return SafePointerCast<SHA256_CTX *>(context);
-}
-
 CHIP_ERROR Hash_SHA256_stream::Begin()
 {
-    SHA256_CTX * const context = to_inner_hash_sha256_context(&mContext);
 
-    const int result = SHA256_Init(context);
+    EVP_MD_CTX * mdctx = EVP_MD_CTX_new();
+    VerifyOrReturnError(mdctx != nullptr, CHIP_ERROR_INTERNAL);
+
+    set_inner_hash_evp_md_ctx(&mContext, mdctx);
+
+    const int result = EVP_DigestInit_ex(mdctx, _digestForType(DigestType::SHA256), nullptr);
+
     VerifyOrReturnError(result == 1, CHIP_ERROR_INTERNAL);
 
     return CHIP_NO_ERROR;
 }
 
+bool Hash_SHA256_stream::IsInitialized()
+{
+    EVP_MD_CTX * mdctx = to_inner_hash_evp_md_ctx(&mContext);
+    VerifyOrReturnValue(mdctx != nullptr, false);
+
+// Verify that the EVP_MD_CTX is initialized to SHA256 (ensures that EVP_DigestInit_ex was successfully called).
+// The legacy API EVP_MD_CTX_md() to check SHA256 initialization is deprecated in OpenSSL 3.0
+// and was replaced by EVP_MD_CTX_get0_md().
+// OpenSSL 1.1.1, which BoringSSL also uses at the time of this comment, does not support the newer replacement API.
+#if CHIP_CRYPTO_BORINGSSL || (defined(OPENSSL_VERSION_NUMBER) && OPENSSL_VERSION_NUMBER < 0x30000000L)
+    return EVP_MD_CTX_md(mdctx) == _digestForType(DigestType::SHA256);
+#else
+    return EVP_MD_CTX_get0_md(mdctx) == _digestForType(DigestType::SHA256);
+#endif
+}
+
 CHIP_ERROR Hash_SHA256_stream::AddData(const ByteSpan data)
 {
-    SHA256_CTX * const context = to_inner_hash_sha256_context(&mContext);
+    VerifyOrReturnError(IsInitialized(), CHIP_ERROR_UNINITIALIZED, Clear());
 
-    const int result = SHA256_Update(context, Uint8::to_const_uchar(data.data()), data.size());
+    EVP_MD_CTX * mdctx = to_inner_hash_evp_md_ctx(&mContext);
+    VerifyOrReturnError(mdctx != nullptr, CHIP_ERROR_INTERNAL);
+
+    const int result = EVP_DigestUpdate(mdctx, data.data(), data.size());
+
     VerifyOrReturnError(result == 1, CHIP_ERROR_INTERNAL);
 
     return CHIP_NO_ERROR;
@@ -470,27 +506,43 @@ CHIP_ERROR Hash_SHA256_stream::AddData(const ByteSpan data)
 
 CHIP_ERROR Hash_SHA256_stream::GetDigest(MutableByteSpan & out_buffer)
 {
-    SHA256_CTX * context = to_inner_hash_sha256_context(&mContext);
 
-    // Back-up context as we are about to finalize the hash to extract digest.
-    SHA256_CTX previous_ctx = *context;
+    VerifyOrReturnError(IsInitialized(), CHIP_ERROR_UNINITIALIZED, Clear());
+
+    EVP_MD_CTX * mdctx = to_inner_hash_evp_md_ctx(&mContext);
+
+    // Back-up the context as we are about to finalize the hash to extract digest.
+    EVP_MD_CTX * previous_mdctx = EVP_MD_CTX_new();
+    VerifyOrReturnError(previous_mdctx != nullptr, CHIP_ERROR_INTERNAL);
+    const int copy_result = EVP_MD_CTX_copy_ex(previous_mdctx, mdctx);
+    VerifyOrReturnError(copy_result == 1, CHIP_ERROR_INTERNAL);
 
     // Pad + compute digest, then finalize context. It is restored next line to continue.
     CHIP_ERROR result = Finish(out_buffer);
 
-    // Restore context prior to finalization.
-    *context = previous_ctx;
+    // free the finalized context.
+    EVP_MD_CTX_free(mdctx);
+
+    // Restore the backed up context, to be able to get intermediate digest again if needed
+    set_inner_hash_evp_md_ctx(&mContext, previous_mdctx);
 
     return result;
 }
 
 CHIP_ERROR Hash_SHA256_stream::Finish(MutableByteSpan & out_buffer)
 {
-    VerifyOrReturnError(out_buffer.size() >= kSHA256_Hash_Length, CHIP_ERROR_BUFFER_TOO_SMALL);
+    unsigned int size;
 
-    SHA256_CTX * const context = to_inner_hash_sha256_context(&mContext);
-    const int result           = SHA256_Final(Uint8::to_uchar(out_buffer.data()), context);
+    VerifyOrReturnError(out_buffer.size() >= kSHA256_Hash_Length, CHIP_ERROR_BUFFER_TOO_SMALL);
+    VerifyOrReturnError(IsInitialized(), CHIP_ERROR_UNINITIALIZED, Clear());
+
+    EVP_MD_CTX * mdctx = to_inner_hash_evp_md_ctx(&mContext);
+
+    const int result = EVP_DigestFinal_ex(mdctx, out_buffer.data(), &size);
+
     VerifyOrReturnError(result == 1, CHIP_ERROR_INTERNAL);
+    VerifyOrReturnError(size == kSHA256_Hash_Length, CHIP_ERROR_INTERNAL);
+
     out_buffer = out_buffer.SubSpan(0, kSHA256_Hash_Length);
 
     return CHIP_NO_ERROR;
@@ -498,6 +550,12 @@ CHIP_ERROR Hash_SHA256_stream::Finish(MutableByteSpan & out_buffer)
 
 void Hash_SHA256_stream::Clear()
 {
+    EVP_MD_CTX * mdctx = to_inner_hash_evp_md_ctx(&mContext);
+
+    // EVP_MD_CTX_free does nothing if a nullptr is passed to it
+    EVP_MD_CTX_free(mdctx);
+    set_inner_hash_evp_md_ctx(&mContext, nullptr);
+
     OPENSSL_cleanse(this, sizeof(*this));
 }
 
@@ -596,6 +654,13 @@ CHIP_ERROR HMAC_sha::HMAC_SHA256(const uint8_t * key, size_t key_length, const u
 exit:
     HMAC_CTX_free(mac_ctx);
     return error;
+}
+
+CHIP_ERROR HMAC_sha::HMAC_SHA256(const Hmac128KeyHandle & key, const uint8_t * message, size_t message_length, uint8_t * out_buffer,
+                                 size_t out_length)
+{
+    return HMAC_SHA256(key.As<Symmetric128BitsKeyByteArray>(), sizeof(Symmetric128BitsKeyByteArray), message, message_length,
+                       out_buffer, out_length);
 }
 
 CHIP_ERROR PBKDF2_sha256::pbkdf2_sha256(const uint8_t * password, size_t plen, const uint8_t * salt, size_t slen,
@@ -698,7 +763,7 @@ CHIP_ERROR P256Keypair::ECDSA_sign_msg(const uint8_t * msg, const size_t msg_len
     ERR_clear_error();
 
     static_assert(P256ECDSASignature::Capacity() >= kP256_ECDSA_Signature_Length_Raw, "P256ECDSASignature must be large enough");
-    VerifyOrExit(mInitialized, error = CHIP_ERROR_WELL_UNINITIALIZED);
+    VerifyOrExit(mInitialized, error = CHIP_ERROR_UNINITIALIZED);
     nid = _nidForCurve(MapECName(mPublicKey.Type()));
     VerifyOrExit(nid != NID_undef, error = CHIP_ERROR_INVALID_ARGUMENT);
 
@@ -917,7 +982,7 @@ CHIP_ERROR P256Keypair::ECDH_derive_secret(const P256PublicKey & remote_public_k
     EC_KEY * ec_key = EC_KEY_dup(to_const_EC_KEY(&mKeypair));
     VerifyOrExit(ec_key != nullptr, error = CHIP_ERROR_INTERNAL);
 
-    VerifyOrExit(mInitialized, error = CHIP_ERROR_WELL_UNINITIALIZED);
+    VerifyOrExit(mInitialized, error = CHIP_ERROR_UNINITIALIZED);
 
     local_key = EVP_PKEY_new();
     VerifyOrExit(local_key != nullptr, error = CHIP_ERROR_INTERNAL);
@@ -1197,7 +1262,7 @@ CHIP_ERROR P256Keypair::NewCertificateSigningRequest(uint8_t * out_csr, size_t &
     X509_NAME * subject = X509_NAME_new();
     VerifyOrExit(subject != nullptr, error = CHIP_ERROR_INTERNAL);
 
-    VerifyOrExit(mInitialized, error = CHIP_ERROR_WELL_UNINITIALIZED);
+    VerifyOrExit(mInitialized, error = CHIP_ERROR_UNINITIALIZED);
 
     result = X509_REQ_set_version(x509_req, 0);
     VerifyOrExit(result == 1, error = CHIP_ERROR_INTERNAL);
@@ -1398,6 +1463,8 @@ void Spake2p_P256_SHA256_HKDF_HMAC::Clear()
         BN_CTX_free(context->bn_ctx);
     }
 
+    sha256_hash_ctx.Clear();
+
     free_point(M);
     free_point(N);
     free_point(X);
@@ -1555,7 +1622,7 @@ CHIP_ERROR Spake2p_P256_SHA256_HKDF_HMAC::PointCofactorMul(void * R)
     return CHIP_NO_ERROR;
 }
 
-CHIP_ERROR Spake2p_P256_SHA256_HKDF_HMAC::ComputeL(uint8_t * Lout, size_t * L_len, const uint8_t * w1in, size_t w1in_len)
+CHIP_ERROR Spake2p_P256_SHA256_HKDF_HMAC::ComputeL(uint8_t * Lout, size_t * L_len, const uint8_t * w1sin, size_t w1sin_len)
 {
     CHIP_ERROR error      = CHIP_ERROR_INTERNAL;
     int error_openssl     = 0;
@@ -1570,8 +1637,8 @@ CHIP_ERROR Spake2p_P256_SHA256_HKDF_HMAC::ComputeL(uint8_t * Lout, size_t * L_le
     Lout_point = EC_POINT_new(context->curve);
     VerifyOrExit(Lout_point != nullptr, error = CHIP_ERROR_INTERNAL);
 
-    VerifyOrExit(CanCastTo<boringssl_size_t_openssl_int>(w1in_len), error = CHIP_ERROR_INTERNAL);
-    BN_bin2bn(Uint8::to_const_uchar(w1in), static_cast<boringssl_size_t_openssl_int>(w1in_len), w1_bn);
+    VerifyOrExit(CanCastTo<boringssl_size_t_openssl_int>(w1sin_len), error = CHIP_ERROR_INTERNAL);
+    BN_bin2bn(Uint8::to_const_uchar(w1sin), static_cast<boringssl_size_t_openssl_int>(w1sin_len), w1_bn);
     error_openssl = BN_mod(w1_bn, w1_bn, (BIGNUM *) order, context->bn_ctx);
     VerifyOrExit(error_openssl == 1, error = CHIP_ERROR_INTERNAL);
 
@@ -2290,11 +2357,11 @@ CHIP_ERROR ReplaceCertIfResignedCertFound(const ByteSpan & referenceCertificate,
     MutableByteSpan referenceSKID(referenceSKIDBuf);
     MutableByteSpan candidateSKID(candidateSKIDBuf);
 
-    ReturnErrorCodeIf(referenceCertificate.empty(), CHIP_ERROR_INVALID_ARGUMENT);
+    VerifyOrReturnError(!referenceCertificate.empty(), CHIP_ERROR_INVALID_ARGUMENT);
 
     outCertificate = referenceCertificate;
 
-    ReturnErrorCodeIf(candidateCertificates == nullptr || candidateCertificatesCount == 0, CHIP_NO_ERROR);
+    VerifyOrReturnError(candidateCertificates != nullptr && candidateCertificatesCount != 0, CHIP_NO_ERROR);
 
     ReturnErrorOnFailure(ExtractSKIDFromX509Cert(referenceCertificate, referenceSKID));
 

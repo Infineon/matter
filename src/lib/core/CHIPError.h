@@ -33,8 +33,11 @@
 
 #include <inttypes.h>
 #include <limits>
-#include <stdint.h>
 #include <type_traits>
+
+#if CHIP_CONFIG_ERROR_SOURCE && __cplusplus >= 202002L
+#include <source_location>
+#endif // CHIP_CONFIG_ERROR_SOURCE && __cplusplus >= 202002L
 
 namespace chip {
 
@@ -91,6 +94,7 @@ public:
         kLwIP       = 0x3, ///< Encapsulated LwIP errors.
         kOpenThread = 0x4, ///< Encapsulated OpenThread errors.
         kPlatform   = 0x5, ///< Platform-defined encapsulation.
+        kNetXDuo    = 0x6, ///< Encapsulated NetXDuo errors.
         kLastRange  = kPlatform,
     };
 
@@ -113,9 +117,13 @@ public:
 
     // Helper for declaring constructors without too much repetition.
 #if CHIP_CONFIG_ERROR_SOURCE
-#define CHIP_INITIALIZE_ERROR_SOURCE(f, l) , mFile((f)), mLine((l))
-#else // CHIP_CONFIG_ERROR_SOURCE
-#define CHIP_INITIALIZE_ERROR_SOURCE(f, l)
+#if __cplusplus >= 202002L
+#define CHIP_INITIALIZE_ERROR_SOURCE(f, l, loc) , mFile((f)), mLine((l)), mSourceLocation((loc))
+#else
+#define CHIP_INITIALIZE_ERROR_SOURCE(f, l, loc) , mFile((f)), mLine((l))
+#endif // __cplusplus >= 202002L
+#else  // CHIP_CONFIG_ERROR_SOURCE
+#define CHIP_INITIALIZE_ERROR_SOURCE(f, l, loc)
 #endif // CHIP_CONFIG_ERROR_SOURCE
 
     /**
@@ -124,12 +132,17 @@ public:
      * @note
      *  The result is valid only if CanEncapsulate() is true.
      */
-    constexpr ChipError(Range range, ValueType value) :
-        mError(MakeInteger(range, (value & MakeMask(0, kValueLength)))) CHIP_INITIALIZE_ERROR_SOURCE(nullptr, 0)
+    constexpr ChipError(Range range, ValueType value) : ChipError(range, value, /*file=*/nullptr, /*line=*/0) {}
+#if CHIP_CONFIG_ERROR_SOURCE && __cplusplus >= 202002L
+    constexpr ChipError(Range range, ValueType value, const char * file, unsigned int line,
+                        std::source_location location = std::source_location::current()) :
+        mError(MakeInteger(range, (value & MakeMask(0, kValueLength)))) CHIP_INITIALIZE_ERROR_SOURCE(file, line, location)
     {}
+#else
     constexpr ChipError(Range range, ValueType value, const char * file, unsigned int line) :
-        mError(MakeInteger(range, (value & MakeMask(0, kValueLength)))) CHIP_INITIALIZE_ERROR_SOURCE(file, line)
+        mError(MakeInteger(range, (value & MakeMask(0, kValueLength)))) CHIP_INITIALIZE_ERROR_SOURCE(file, line, /*loc=*/nullptr)
     {}
+#endif // CHIP_CONFIG_ERROR_SOURCE && __cplusplus >= 202002L
 
     /**
      * Construct a CHIP_ERROR for SdkPart @a part with @a code.
@@ -137,10 +150,17 @@ public:
      * @note
      *  The macro version CHIP_SDK_ERROR checks that the numeric value is constant and well-formed.
      */
-    constexpr ChipError(SdkPart part, uint8_t code) : mError(MakeInteger(part, code)) CHIP_INITIALIZE_ERROR_SOURCE(nullptr, 0) {}
-    constexpr ChipError(SdkPart part, uint8_t code, const char * file, unsigned int line) :
-        mError(MakeInteger(part, code)) CHIP_INITIALIZE_ERROR_SOURCE(file, line)
+    constexpr ChipError(SdkPart part, uint8_t code) : ChipError(part, code, /*file=*/nullptr, /*line=*/0) {}
+#if CHIP_CONFIG_ERROR_SOURCE && __cplusplus >= 202002L
+    constexpr ChipError(SdkPart part, uint8_t code, const char * file, unsigned int line,
+                        std::source_location location = std::source_location::current()) :
+        mError(MakeInteger(part, code)) CHIP_INITIALIZE_ERROR_SOURCE(file, line, location)
     {}
+#else
+    constexpr ChipError(SdkPart part, uint8_t code, const char * file, unsigned int line) :
+        mError(MakeInteger(part, code)) CHIP_INITIALIZE_ERROR_SOURCE(file, line, /*loc=*/nullptr)
+    {}
+#endif // CHIP_CONFIG_ERROR_SOURCE && __cplusplus >= 202002L
 
     /**
      * Construct a CHIP_ERROR constant for SdkPart @a part with @a code at the current source line.
@@ -160,10 +180,17 @@ public:
      * @note
      *  This is intended to be used only in foreign function interfaces.
      */
-    explicit constexpr ChipError(StorageType error) : mError(error) CHIP_INITIALIZE_ERROR_SOURCE(nullptr, 0) {}
-    explicit constexpr ChipError(StorageType error, const char * file, unsigned int line) :
-        mError(error) CHIP_INITIALIZE_ERROR_SOURCE(file, line)
+    explicit constexpr ChipError(StorageType error) : ChipError(error, /*file=*/nullptr, /*line=*/0) {}
+#if CHIP_CONFIG_ERROR_SOURCE && __cplusplus >= 202002L
+    explicit constexpr ChipError(StorageType error, const char * file, unsigned int line,
+                                 std::source_location location = std::source_location::current()) :
+        mError(error) CHIP_INITIALIZE_ERROR_SOURCE(file, line, location)
     {}
+#else
+    explicit constexpr ChipError(StorageType error, const char * file, unsigned int line) :
+        mError(error) CHIP_INITIALIZE_ERROR_SOURCE(file, line, /*loc=*/nullptr)
+    {}
+#endif // CHIP_CONFIG_ERROR_SOURCE && __cplusplus >= 202002L
 
 #undef CHIP_INITIALIZE_ERROR_SOURCE
 
@@ -213,10 +240,10 @@ public:
      * @note
      *  Normally, prefer to use Format()
      */
-    const char * AsString() const
+    const char * AsString(bool withSourceLocation = true) const
     {
-        extern const char * ErrorStr(ChipError);
-        return ErrorStr(*this);
+        extern const char * ErrorStr(ChipError, bool);
+        return ErrorStr(*this, withSourceLocation);
     }
 
     /**
@@ -300,6 +327,12 @@ public:
      */
     unsigned int GetLine() const { return mLine; }
 
+#if __cplusplus >= 202002L
+    /**
+     * Get the source_location of the point where the error occurred.
+     */
+    const std::source_location & GetSourceLocation() { return mSourceLocation; }
+#endif // __cplusplus >= 202002L
 #endif // CHIP_CONFIG_ERROR_SOURCE
 
 private:
@@ -366,6 +399,9 @@ private:
 #if CHIP_CONFIG_ERROR_SOURCE
     const char * mFile;
     unsigned int mLine;
+#if __cplusplus >= 202002L
+    std::source_location mSourceLocation;
+#endif // __cplusplus >= 202002L
 #endif // CHIP_CONFIG_ERROR_SOURCE
 
 public:
@@ -374,13 +410,13 @@ public:
      *
      * This template ensures that the numeric value is constant and well-formed.
      */
-    template <SdkPart PART, StorageType CODE>
+    template <SdkPart PART, StorageType SCODE>
     struct SdkErrorConstant
     {
         static_assert(FitsInField(kSdkPartLength, to_underlying(PART)), "part is too large");
-        static_assert(FitsInField(kSdkCodeLength, CODE), "code is too large");
-        static_assert(MakeInteger(PART, CODE) != 0, "value is zero");
-        static constexpr StorageType value = MakeInteger(PART, CODE);
+        static_assert(FitsInField(kSdkCodeLength, SCODE), "code is too large");
+        static_assert(MakeInteger(PART, SCODE) != 0, "value is zero");
+        static constexpr StorageType value = MakeInteger(PART, SCODE);
     };
 };
 
@@ -404,10 +440,29 @@ using CHIP_ERROR = ::chip::ChipError;
     CHIP_SDK_ERROR(::chip::ChipError::SdkPart::kIMGlobalStatus,                                                                    \
                    ::chip::to_underlying(::chip::Protocols::InteractionModel::Status::type))
 
+// Defines a runtime-value for a chip-error that contains a global IM Status.
+#if CHIP_CONFIG_ERROR_SOURCE
+#define CHIP_ERROR_IM_GLOBAL_STATUS_VALUE(status_value)                                                                            \
+    ::chip::ChipError(::chip::ChipError::SdkPart::kIMGlobalStatus, ::chip::to_underlying(status_value), __FILE__, __LINE__)
+#else
+#define CHIP_ERROR_IM_GLOBAL_STATUS_VALUE(status_value)                                                                            \
+    ::chip::ChipError(::chip::ChipError::SdkPart::kIMGlobalStatus, ::chip::to_underlying(status_value))
+#endif // CHIP_CONFIG_ERROR_SOURCE
+
 //
 // type must be a compile-time constant as mandated by CHIP_SDK_ERROR.
 //
 #define CHIP_IM_CLUSTER_STATUS(type) CHIP_SDK_ERROR(::chip::ChipError::SdkPart::kIMClusterStatus, type)
+
+// Defines a runtime-value for a chip-error that contains a cluster-specific error status.
+// Must not be used with cluster-specific success status codes.
+#if CHIP_CONFIG_ERROR_SOURCE
+#define CHIP_ERROR_IM_CLUSTER_STATUS_VALUE(status_value)                                                                           \
+    ::chip::ChipError(::chip::ChipError::SdkPart::kIMClusterStatus, status_value, __FILE__, __LINE__)
+#else
+#define CHIP_ERROR_IM_CLUSTER_STATUS_VALUE(status_value)                                                                           \
+    ::chip::ChipError(::chip::ChipError::SdkPart::kIMClusterStatus, status_value)
+#endif // CHIP_CONFIG_ERROR_SOURCE
 
 // clang-format off
 
@@ -581,7 +636,14 @@ using CHIP_ERROR = ::chip::ChipError;
  */
 #define CHIP_ERROR_WRONG_ENCRYPTION_TYPE                       CHIP_CORE_ERROR(0x11)
 
-// AVAILABLE: 0x12
+/**
+ *  @def CHIP_ERROR_INVALID_UTF8
+ *
+ *  @brief
+ *    Invalid UTF8 string (contains some characters that are invalid)
+ *
+ */
+#define CHIP_ERROR_INVALID_UTF8                                CHIP_CORE_ERROR(0x12)
 
 /**
  *  @def CHIP_ERROR_INTEGRITY_CHECK_FAILED
@@ -602,8 +664,23 @@ using CHIP_ERROR = ::chip::ChipError;
  */
 #define CHIP_ERROR_INVALID_SIGNATURE                           CHIP_CORE_ERROR(0x14)
 
-// AVAILABLE: 0x15
-// AVAILABLE: 0x16
+/**
+ *  @def CHIP_ERROR_INVALID_TLV_CHAR_STRING
+ *
+ *  @brief
+ *    Invalid TLV character string (e.g. null terminator)
+ *
+ */
+#define CHIP_ERROR_INVALID_TLV_CHAR_STRING                     CHIP_CORE_ERROR(0x15)
+
+/**
+ *  @def CHIP_ERROR_LIT_SUBSCRIBE_INACTIVE_TIMEOUT
+ *
+ *  @brief
+ *    Subscription timeout caused by LIT ICD device inactive mode
+ *
+ */
+#define CHIP_ERROR_LIT_SUBSCRIBE_INACTIVE_TIMEOUT              CHIP_CORE_ERROR(0x16)
 
 /**
  *  @def CHIP_ERROR_UNSUPPORTED_SIGNATURE_TYPE
@@ -651,22 +728,22 @@ using CHIP_ERROR = ::chip::ChipError;
 #define CHIP_ERROR_WRONG_KEY_TYPE                              CHIP_CORE_ERROR(0x1b)
 
 /**
- *  @def CHIP_ERROR_WELL_UNINITIALIZED
+ *  @def CHIP_ERROR_UNINITIALIZED
  *
  *  @brief
  *    A requested object is uninitialized.
  *
  */
-#define CHIP_ERROR_WELL_UNINITIALIZED                          CHIP_CORE_ERROR(0x1c)
+#define CHIP_ERROR_UNINITIALIZED                               CHIP_CORE_ERROR(0x1c)
 
 /**
- *  @def CHIP_ERROR_WELL_EMPTY
+ *  @def CHIP_ERROR_INVALID_IPK
  *
  *  @brief
- *    A requested object is empty.
+ *    The IPK is invalid
  *
  */
-#define CHIP_ERROR_WELL_EMPTY                                  CHIP_CORE_ERROR(0x1d)
+#define CHIP_ERROR_INVALID_IPK                                 CHIP_CORE_ERROR(0x1d)
 
 /**
  *  @def CHIP_ERROR_INVALID_STRING_LENGTH
@@ -686,7 +763,14 @@ using CHIP_ERROR = ::chip::ChipError;
  */
 #define CHIP_ERROR_INVALID_LIST_LENGTH                         CHIP_CORE_ERROR(0x1f)
 
-// AVAILABLE: 0x20
+/**
+ *  @def CHIP_ERROR_FAILED_DEVICE_ATTESTATION
+ *
+ *  @brief
+ *    Device Attestation failed.
+ *
+ */
+#define CHIP_ERROR_FAILED_DEVICE_ATTESTATION                   CHIP_CORE_ERROR(0x20)
 
 /**
  *  @def CHIP_END_OF_TLV
@@ -754,8 +838,25 @@ using CHIP_ERROR = ::chip::ChipError;
  */
 #define CHIP_ERROR_TLV_CONTAINER_OPEN                          CHIP_CORE_ERROR(0x27)
 
-// AVAILABLE: 0x28
-// AVAILABLE: 0x29
+/**
+ *  @def CHIP_ERROR_IN_USE
+ *
+ *  @brief
+ *    A value is already used. Generally indicates an unavailable resource.
+ *    As opposed to CHIP_ERROR_BUSY, the use is not considered transient/temporary.
+ *
+ */
+#define CHIP_ERROR_IN_USE                                      CHIP_CORE_ERROR(0x28)
+
+/**
+ *  @def CHIP_ERROR_HAD_FAILURES
+ *
+ *  @brief
+ *    Report a multi-part operation as having had failures.
+ *    This is used as an aggregate of a single CHIP_ERROR when several underlying
+ *    calls may have failed and no single point of failure is reported.
+ */
+#define CHIP_ERROR_HAD_FAILURES                                CHIP_CORE_ERROR(0x29)
 
 /**
  *  @def CHIP_ERROR_INVALID_MESSAGE_TYPE
@@ -775,7 +876,15 @@ using CHIP_ERROR = ::chip::ChipError;
  */
 #define CHIP_ERROR_UNEXPECTED_TLV_ELEMENT                      CHIP_CORE_ERROR(0x2b)
 
-// AVAILABLE: 0x2c
+/**
+ *  @def CHIP_ERROR_ALREADY_INITIALIZED
+ *
+ *  @brief
+ *    Mark that an object has already beein initialized and cannot be
+ *    initialized again
+ *
+ */
+#define CHIP_ERROR_ALREADY_INITIALIZED                        CHIP_CORE_ERROR(0x2c)
 
 /**
  *  @def CHIP_ERROR_NOT_IMPLEMENTED
@@ -1237,7 +1346,14 @@ using CHIP_ERROR = ::chip::ChipError;
  */
 #define CHIP_ERROR_FABRIC_EXISTS                               CHIP_CORE_ERROR(0x7e)
 
-// AVAILABLE: 0x7f
+/**
+ *  @def CHIP_ERROR_ENDPOINT_EXISTS
+ *
+ *  @brief
+ *    The endpoint with the given endpoint id already exists.
+ *
+ */
+#define CHIP_ERROR_ENDPOINT_EXISTS                               CHIP_CORE_ERROR(0x7f)
 
 /**
  *  @def CHIP_ERROR_WRONG_ENCRYPTION_TYPE_FROM_PEER
@@ -1394,7 +1510,14 @@ using CHIP_ERROR = ::chip::ChipError;
  */
 #define CHIP_ERROR_VERSION_MISMATCH                            CHIP_CORE_ERROR(0xa7)
 
-// AVAILABLE: 0xa8
+/**
+ *  @def CHIP_ERROR_ACCESS_RESTRICTED_BY_ARL
+ *
+ *  @brief
+ *    The CHIP message is not granted access for further processing due to Access Restriction List.
+ */
+#define CHIP_ERROR_ACCESS_RESTRICTED_BY_ARL                    CHIP_CORE_ERROR(0xa8)
+
 // AVAILABLE: 0xa9
 // AVAILABLE: 0xaa
 
@@ -1507,7 +1630,14 @@ using CHIP_ERROR = ::chip::ChipError;
  */
 #define CHIP_ERROR_IM_MALFORMED_EVENT_DATA_IB             CHIP_CORE_ERROR(0xba)
 
-// AVAILABLE: 0xbb
+/**
+ * @def CHIP_ERROR_MAXIMUM_PATHS_PER_INVOKE_EXCEEDED
+ *
+ * @brief
+ *   Caller is trying to add more invoke command paths
+ *   than what the remote node reports supporting.
+ */
+#define CHIP_ERROR_MAXIMUM_PATHS_PER_INVOKE_EXCEEDED           CHIP_CORE_ERROR(0xbb)
 
 /**
  * @def CHIP_ERROR_PEER_NODE_NOT_FOUND
@@ -1615,18 +1745,18 @@ using CHIP_ERROR = ::chip::ChipError;
  */
 #define CHIP_ERROR_IM_STATUS_CODE_RECEIVED                     CHIP_CORE_ERROR(0xca)
 
-// AVAILABLEL 0xcb
-// AVAILABLEL 0xcc
-// AVAILABLEL 0xcd
-// AVAILABLEL 0xce
-// AVAILABLEL 0xcf
-// AVAILABLEL 0xd0
-// AVAILABLEL 0xd1
-// AVAILABLEL 0xd2
-// AVAILABLEL 0xd3
-// AVAILABLEL 0xd4
-// AVAILABLEL 0xd5
-// AVAILABLEL 0xd6
+// AVAILABLE 0xcb
+// AVAILABLE 0xcc
+// AVAILABLE 0xcd
+// AVAILABLE 0xce
+// AVAILABLE 0xcf
+// AVAILABLE 0xd0
+// AVAILABLE 0xd1
+// AVAILABLE 0xd2
+// AVAILABLE 0xd3
+// AVAILABLE 0xd4
+// AVAILABLE 0xd5
+// AVAILABLE 0xd6
 
 /**
  * @def CHIP_ERROR_IM_MALFORMED_DATA_VERSION_FILTER_IB
@@ -1717,6 +1847,7 @@ using CHIP_ERROR = ::chip::ChipError;
 namespace chip {
 
 extern void RegisterCHIPLayerErrorFormatter();
+extern void DeregisterCHIPLayerErrorFormatter();
 extern bool FormatCHIPError(char * buf, uint16_t bufSize, CHIP_ERROR err);
 
 } // namespace chip

@@ -27,7 +27,7 @@
 #define GENERIC_CONFIGURATION_MANAGER_IMPL_CPP
 
 #include <FirmwareBuildTime.h>
-#include <ble/CHIPBleServiceData.h>
+#include <ble/Ble.h>
 #include <crypto/CHIPCryptoPAL.h>
 #include <crypto/RandUtils.h>
 #include <inttypes.h>
@@ -49,6 +49,8 @@
 #include <platform/ThreadStackManager.h>
 #endif
 
+#include <optional>
+
 // TODO : may be we can make it configurable
 #define BLE_ADVERTISEMENT_VERSION 0
 
@@ -56,7 +58,9 @@ namespace chip {
 namespace DeviceLayer {
 namespace Internal {
 
-static Optional<System::Clock::Seconds32> sFirmwareBuildChipEpochTime;
+namespace {
+std::optional<System::Clock::Seconds32> gFirmwareBuildChipEpochTime;
+}
 
 #if CHIP_USE_TRANSITIONAL_COMMISSIONABLE_DATA_PROVIDER
 
@@ -177,7 +181,7 @@ CHIP_ERROR LegacyTemporaryCommissionableDataProvider<ConfigClass>::GetSpake2pSal
     if (err == CHIP_DEVICE_ERROR_CONFIG_NOT_FOUND)
     {
         saltB64Len = strlen(CHIP_DEVICE_CONFIG_USE_TEST_SPAKE2P_SALT);
-        ReturnErrorCodeIf(saltB64Len > sizeof(saltB64), CHIP_ERROR_BUFFER_TOO_SMALL);
+        VerifyOrReturnError(saltB64Len <= sizeof(saltB64), CHIP_ERROR_BUFFER_TOO_SMALL);
         memcpy(saltB64, CHIP_DEVICE_CONFIG_USE_TEST_SPAKE2P_SALT, saltB64Len);
         err = CHIP_NO_ERROR;
     }
@@ -189,7 +193,7 @@ CHIP_ERROR LegacyTemporaryCommissionableDataProvider<ConfigClass>::GetSpake2pSal
 
     size_t saltLen = chip::Base64Decode32(saltB64, static_cast<uint32_t>(saltB64Len), reinterpret_cast<uint8_t *>(saltB64));
 
-    ReturnErrorCodeIf(saltLen > saltBuf.size(), CHIP_ERROR_BUFFER_TOO_SMALL);
+    VerifyOrReturnError(saltLen <= saltBuf.size(), CHIP_ERROR_BUFFER_TOO_SMALL);
     memcpy(saltBuf.data(), saltB64, saltLen);
     saltBuf.reduce_size(saltLen);
 
@@ -214,7 +218,7 @@ CHIP_ERROR LegacyTemporaryCommissionableDataProvider<ConfigClass>::GetSpake2pVer
     if (err == CHIP_DEVICE_ERROR_CONFIG_NOT_FOUND)
     {
         verifierB64Len = strlen(CHIP_DEVICE_CONFIG_USE_TEST_SPAKE2P_VERIFIER);
-        ReturnErrorCodeIf(verifierB64Len > sizeof(verifierB64), CHIP_ERROR_BUFFER_TOO_SMALL);
+        VerifyOrReturnError(verifierB64Len <= sizeof(verifierB64), CHIP_ERROR_BUFFER_TOO_SMALL);
         memcpy(verifierB64, CHIP_DEVICE_CONFIG_USE_TEST_SPAKE2P_VERIFIER, verifierB64Len);
         err = CHIP_NO_ERROR;
     }
@@ -226,7 +230,7 @@ CHIP_ERROR LegacyTemporaryCommissionableDataProvider<ConfigClass>::GetSpake2pVer
     verifierLen =
         chip::Base64Decode32(verifierB64, static_cast<uint32_t>(verifierB64Len), reinterpret_cast<uint8_t *>(verifierB64));
 
-    ReturnErrorCodeIf(verifierLen > verifierBuf.size(), CHIP_ERROR_BUFFER_TOO_SMALL);
+    VerifyOrReturnError(verifierLen <= verifierBuf.size(), CHIP_ERROR_BUFFER_TOO_SMALL);
     memcpy(verifierBuf.data(), verifierB64, verifierLen);
     verifierBuf.reduce_size(verifierLen);
 
@@ -244,9 +248,11 @@ CHIP_ERROR GenericConfigurationManagerImpl<ConfigClass>::Init()
     mLifetimePersistedCounter.Init(CHIP_CONFIG_LIFETIIME_PERSISTED_COUNTER_KEY);
 #endif
 
+#if CHIP_USE_TRANSITIONAL_DEVICE_INSTANCE_INFO_PROVIDER
     static GenericDeviceInstanceInfoProvider<ConfigClass> sGenericDeviceInstanceInfoProvider(*this);
 
     SetDeviceInstanceInfoProvider(&sGenericDeviceInstanceInfoProvider);
+#endif
 
 #if CHIP_USE_TRANSITIONAL_COMMISSIONABLE_DATA_PROVIDER
     // Using a temporary singleton here because the overall GenericConfigurationManagerImpl is
@@ -283,12 +289,25 @@ inline CHIP_ERROR GenericConfigurationManagerImpl<ConfigClass>::StoreSoftwareVer
 }
 
 template <class ConfigClass>
+CHIP_ERROR GenericConfigurationManagerImpl<ConfigClass>::GetConfigurationVersion(uint32_t & configurationVer)
+{
+    configurationVer = static_cast<uint32_t>(CHIP_DEVICE_CONFIG_DEVICE_CONFIGURATION_VERSION);
+    return CHIP_NO_ERROR;
+}
+
+template <class ConfigClass>
+inline CHIP_ERROR GenericConfigurationManagerImpl<ConfigClass>::StoreConfigurationVersion(uint32_t configurationVer)
+{
+    return CHIP_ERROR_UNSUPPORTED_CHIP_FEATURE;
+}
+
+template <class ConfigClass>
 CHIP_ERROR GenericConfigurationManagerImpl<ConfigClass>::GetFirmwareBuildChipEpochTime(System::Clock::Seconds32 & chipEpochTime)
 {
     // If the setter was called and we have a value in memory, return this.
-    if (sFirmwareBuildChipEpochTime.HasValue())
+    if (gFirmwareBuildChipEpochTime.has_value())
     {
-        chipEpochTime = sFirmwareBuildChipEpochTime.Value();
+        chipEpochTime = gFirmwareBuildChipEpochTime.value();
         return CHIP_NO_ERROR;
     }
 #ifdef CHIP_DEVICE_CONFIG_FIRMWARE_BUILD_TIME_MATTER_EPOCH_S
@@ -321,7 +340,7 @@ CHIP_ERROR GenericConfigurationManagerImpl<ConfigClass>::SetFirmwareBuildChipEpo
     //
     // Implementations that can't use the hard-coded time for whatever reason
     // should set this at each init.
-    sFirmwareBuildChipEpochTime.SetValue(chipEpochTime);
+    gFirmwareBuildChipEpochTime = chipEpochTime;
     return CHIP_NO_ERROR;
 }
 
@@ -349,7 +368,7 @@ CHIP_ERROR GenericConfigurationManagerImpl<ConfigClass>::GetSecondaryPairingHint
 template <class ConfigClass>
 CHIP_ERROR GenericConfigurationManagerImpl<ConfigClass>::GetSoftwareVersionString(char * buf, size_t bufSize)
 {
-    ReturnErrorCodeIf(bufSize < sizeof(CHIP_DEVICE_CONFIG_DEVICE_SOFTWARE_VERSION_STRING), CHIP_ERROR_BUFFER_TOO_SMALL);
+    VerifyOrReturnError(bufSize >= sizeof(CHIP_DEVICE_CONFIG_DEVICE_SOFTWARE_VERSION_STRING), CHIP_ERROR_BUFFER_TOO_SMALL);
     strcpy(buf, CHIP_DEVICE_CONFIG_DEVICE_SOFTWARE_VERSION_STRING);
     return CHIP_NO_ERROR;
 }
@@ -367,24 +386,26 @@ CHIP_ERROR GenericConfigurationManagerImpl<ConfigClass>::GetPrimaryWiFiMACAddres
 }
 
 template <class ConfigClass>
-CHIP_ERROR GenericConfigurationManagerImpl<ConfigClass>::GetPrimaryMACAddress(MutableByteSpan buf)
+CHIP_ERROR GenericConfigurationManagerImpl<ConfigClass>::GetPrimaryMACAddress(MutableByteSpan & buf)
 {
     if (buf.size() != ConfigurationManager::kPrimaryMACAddressLength)
         return CHIP_ERROR_INVALID_ARGUMENT;
 
-    memset(buf.data(), 0, buf.size());
+    memset(buf.data(), 0, buf.size()); // zero the whole buffer, in case the caller ignores buf.size()
 
 #if CHIP_DEVICE_CONFIG_ENABLE_THREAD
     if (chip::DeviceLayer::ThreadStackMgr().GetPrimary802154MACAddress(buf.data()) == CHIP_NO_ERROR)
     {
         ChipLogDetail(DeviceLayer, "Using Thread extended MAC for hostname.");
+        buf.reduce_size(kThreadMACAddressLength);
         return CHIP_NO_ERROR;
     }
 #endif
 
     if (chip::DeviceLayer::ConfigurationMgr().GetPrimaryWiFiMACAddress(buf.data()) == CHIP_NO_ERROR)
     {
-        ChipLogDetail(DeviceLayer, "Using wifi MAC for hostname");
+        ChipLogDetail(DeviceLayer, "Using WiFi MAC for hostname");
+        buf.reduce_size(kEthernetMACAddressLength);
         return CHIP_NO_ERROR;
     }
 
@@ -395,7 +416,7 @@ template <class ConfigClass>
 CHIP_ERROR GenericConfigurationManagerImpl<ConfigClass>::GetPrimary802154MACAddress(uint8_t * buf)
 {
 #if CHIP_DEVICE_CONFIG_ENABLE_THREAD
-    return ThreadStackManager().GetPrimary802154MACAddress(buf);
+    return ThreadStackMgr().GetPrimary802154MACAddress(buf);
 #else
     return CHIP_DEVICE_ERROR_CONFIG_NOT_FOUND;
 #endif // CHIP_DEVICE_CONFIG_ENABLE_THREAD
@@ -511,9 +532,11 @@ CHIP_ERROR GenericConfigurationManagerImpl<ConfigClass>::GetUniqueId(char * buf,
     err                = ReadConfigValueStr(ConfigClass::kConfigKey_UniqueId, buf, bufSize, uniqueIdLen);
 
     ReturnErrorOnFailure(err);
+    VerifyOrReturnError(uniqueIdLen < bufSize, CHIP_ERROR_BUFFER_TOO_SMALL);
 
-    ReturnErrorCodeIf(uniqueIdLen >= bufSize, CHIP_ERROR_BUFFER_TOO_SMALL);
-    ReturnErrorCodeIf(buf[uniqueIdLen] != 0, CHIP_ERROR_INVALID_STRING_LENGTH);
+    // ensure null termination if the string read is not null terminting (e.g. posix config on darwin
+    // returns data without null terminators as it reads data as binary.)
+    buf[uniqueIdLen] = 0;
 
     return err;
 }
@@ -548,8 +571,8 @@ CHIP_ERROR GenericConfigurationManagerImpl<ConfigClass>::IncrementLifetimeCounte
 template <class ConfigClass>
 CHIP_ERROR GenericConfigurationManagerImpl<ConfigClass>::SetRotatingDeviceIdUniqueId(const ByteSpan & uniqueIdSpan)
 {
-    ReturnErrorCodeIf(uniqueIdSpan.size() < kMinRotatingDeviceIDUniqueIDLength, CHIP_ERROR_INVALID_ARGUMENT);
-    ReturnErrorCodeIf(uniqueIdSpan.size() > CHIP_DEVICE_CONFIG_ROTATING_DEVICE_ID_UNIQUE_ID_LENGTH, CHIP_ERROR_BUFFER_TOO_SMALL);
+    VerifyOrReturnError(uniqueIdSpan.size() >= kMinRotatingDeviceIDUniqueIDLength, CHIP_ERROR_INVALID_ARGUMENT);
+    VerifyOrReturnError(uniqueIdSpan.size() <= CHIP_DEVICE_CONFIG_ROTATING_DEVICE_ID_UNIQUE_ID_LENGTH, CHIP_ERROR_BUFFER_TOO_SMALL);
     memcpy(mRotatingDeviceIdUniqueId, uniqueIdSpan.data(), uniqueIdSpan.size());
     mRotatingDeviceIdUniqueIdLength = uniqueIdSpan.size();
     return CHIP_NO_ERROR;
@@ -558,7 +581,7 @@ CHIP_ERROR GenericConfigurationManagerImpl<ConfigClass>::SetRotatingDeviceIdUniq
 template <class ConfigClass>
 CHIP_ERROR GenericConfigurationManagerImpl<ConfigClass>::GetRotatingDeviceIdUniqueId(MutableByteSpan & uniqueIdSpan)
 {
-    ReturnErrorCodeIf(mRotatingDeviceIdUniqueIdLength > uniqueIdSpan.size(), CHIP_ERROR_BUFFER_TOO_SMALL);
+    VerifyOrReturnError(mRotatingDeviceIdUniqueIdLength <= uniqueIdSpan.size(), CHIP_ERROR_BUFFER_TOO_SMALL);
     memcpy(uniqueIdSpan.data(), mRotatingDeviceIdUniqueId, mRotatingDeviceIdUniqueIdLength);
     uniqueIdSpan.reduce_size(mRotatingDeviceIdUniqueIdLength);
     return CHIP_NO_ERROR;
@@ -642,7 +665,7 @@ bool GenericConfigurationManagerImpl<ConfigClass>::IsCommissionableDeviceNameEna
 template <class ConfigClass>
 CHIP_ERROR GenericConfigurationManagerImpl<ConfigClass>::GetCommissionableDeviceName(char * buf, size_t bufSize)
 {
-    ReturnErrorCodeIf(bufSize < sizeof(CHIP_DEVICE_CONFIG_DEVICE_NAME), CHIP_ERROR_BUFFER_TOO_SMALL);
+    VerifyOrReturnError(bufSize >= sizeof(CHIP_DEVICE_CONFIG_DEVICE_NAME), CHIP_ERROR_BUFFER_TOO_SMALL);
     strcpy(buf, CHIP_DEVICE_CONFIG_DEVICE_NAME);
     return CHIP_NO_ERROR;
 }
@@ -650,7 +673,7 @@ CHIP_ERROR GenericConfigurationManagerImpl<ConfigClass>::GetCommissionableDevice
 template <class ConfigClass>
 CHIP_ERROR GenericConfigurationManagerImpl<ConfigClass>::GetInitialPairingInstruction(char * buf, size_t bufSize)
 {
-    ReturnErrorCodeIf(bufSize < sizeof(CHIP_DEVICE_CONFIG_PAIRING_INITIAL_INSTRUCTION), CHIP_ERROR_BUFFER_TOO_SMALL);
+    VerifyOrReturnError(bufSize >= sizeof(CHIP_DEVICE_CONFIG_PAIRING_INITIAL_INSTRUCTION), CHIP_ERROR_BUFFER_TOO_SMALL);
     strcpy(buf, CHIP_DEVICE_CONFIG_PAIRING_INITIAL_INSTRUCTION);
     return CHIP_NO_ERROR;
 }
@@ -658,20 +681,19 @@ CHIP_ERROR GenericConfigurationManagerImpl<ConfigClass>::GetInitialPairingInstru
 template <class ConfigClass>
 CHIP_ERROR GenericConfigurationManagerImpl<ConfigClass>::GetSecondaryPairingInstruction(char * buf, size_t bufSize)
 {
-    ReturnErrorCodeIf(bufSize < sizeof(CHIP_DEVICE_CONFIG_PAIRING_SECONDARY_INSTRUCTION), CHIP_ERROR_BUFFER_TOO_SMALL);
+    VerifyOrReturnError(bufSize >= sizeof(CHIP_DEVICE_CONFIG_PAIRING_SECONDARY_INSTRUCTION), CHIP_ERROR_BUFFER_TOO_SMALL);
     strcpy(buf, CHIP_DEVICE_CONFIG_PAIRING_SECONDARY_INSTRUCTION);
     return CHIP_NO_ERROR;
 }
 
+#if CHIP_CONFIG_TEST
 template <class ConfigClass>
-CHIP_ERROR GenericConfigurationManagerImpl<ConfigClass>::RunUnitTests()
+void GenericConfigurationManagerImpl<ConfigClass>::RunUnitTests()
 {
-#if !defined(NDEBUG)
     ChipLogProgress(DeviceLayer, "Running configuration unit test");
     RunConfigUnitTest();
-#endif
-    return CHIP_NO_ERROR;
 }
+#endif
 
 template <class ConfigClass>
 void GenericConfigurationManagerImpl<ConfigClass>::LogDeviceConfig()

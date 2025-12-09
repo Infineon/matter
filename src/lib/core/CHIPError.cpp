@@ -15,27 +15,29 @@
  *    See the License for the specific language governing permissions and
  *    limitations under the License.
  */
-
-/**
- *    @file
- *      This file contains functions for working with CHIP errors.
- */
-
-#include <stddef.h>
+#include <lib/core/CHIPError.h>
 
 #include <lib/core/CHIPConfig.h>
 #include <lib/core/ErrorStr.h>
 
 namespace chip {
 
+static ErrorFormatter sCHIPErrorFormatter = { FormatCHIPError, nullptr };
+
 /**
  * Register a text error formatter for CHIP core errors.
  */
 void RegisterCHIPLayerErrorFormatter()
 {
-    static ErrorFormatter sCHIPErrorFormatter = { FormatCHIPError, nullptr };
-
     RegisterErrorFormatter(&sCHIPErrorFormatter);
+}
+
+/**
+ * Deregister a text error formatter for CHIP core errors.
+ */
+void DeregisterCHIPLayerErrorFormatter()
+{
+    DeregisterErrorFormatter(&sCHIPErrorFormatter);
 }
 
 /**
@@ -113,11 +115,17 @@ bool FormatCHIPError(char * buf, uint16_t bufSize, CHIP_ERROR err)
     case CHIP_ERROR_WRONG_ENCRYPTION_TYPE.AsInteger():
         desc = "Wrong encryption type";
         break;
+    case CHIP_ERROR_INVALID_UTF8.AsInteger():
+        desc = "Character string is not a valid utf-8 encoding";
+        break;
     case CHIP_ERROR_INTEGRITY_CHECK_FAILED.AsInteger():
         desc = "Integrity check failed";
         break;
     case CHIP_ERROR_INVALID_SIGNATURE.AsInteger():
         desc = "Invalid signature";
+        break;
+    case CHIP_ERROR_INVALID_TLV_CHAR_STRING.AsInteger():
+        desc = "Invalid TLV Char string encoding.";
         break;
     case CHIP_ERROR_UNSUPPORTED_SIGNATURE_TYPE.AsInteger():
         desc = "Unsupported signature type";
@@ -134,17 +142,20 @@ bool FormatCHIPError(char * buf, uint16_t bufSize, CHIP_ERROR err)
     case CHIP_ERROR_WRONG_KEY_TYPE.AsInteger():
         desc = "Wrong key type";
         break;
-    case CHIP_ERROR_WELL_UNINITIALIZED.AsInteger():
-        desc = "Well uninitialized";
+    case CHIP_ERROR_UNINITIALIZED.AsInteger():
+        desc = "Uninitialized";
         break;
-    case CHIP_ERROR_WELL_EMPTY.AsInteger():
-        desc = "Well empty";
+    case CHIP_ERROR_INVALID_IPK.AsInteger():
+        desc = "Invalid IPK";
         break;
     case CHIP_ERROR_INVALID_STRING_LENGTH.AsInteger():
         desc = "Invalid string length";
         break;
     case CHIP_ERROR_INVALID_LIST_LENGTH.AsInteger():
-        desc = "invalid list length";
+        desc = "Invalid list length";
+        break;
+    case CHIP_ERROR_FAILED_DEVICE_ATTESTATION.AsInteger():
+        desc = "Failed Device Attestation";
         break;
     case CHIP_END_OF_TLV.AsInteger():
         desc = "End of TLV";
@@ -167,11 +178,20 @@ bool FormatCHIPError(char * buf, uint16_t bufSize, CHIP_ERROR err)
     case CHIP_ERROR_TLV_CONTAINER_OPEN.AsInteger():
         desc = "TLV container open";
         break;
+    case CHIP_ERROR_IN_USE.AsInteger():
+        desc = "In use";
+        break;
+    case CHIP_ERROR_HAD_FAILURES.AsInteger():
+        desc = "Operation had failures";
+        break;
     case CHIP_ERROR_INVALID_MESSAGE_TYPE.AsInteger():
         desc = "Invalid message type";
         break;
     case CHIP_ERROR_UNEXPECTED_TLV_ELEMENT.AsInteger():
         desc = "Unexpected TLV element";
+        break;
+    case CHIP_ERROR_ALREADY_INITIALIZED.AsInteger():
+        desc = "Already initialized";
         break;
     case CHIP_ERROR_NOT_IMPLEMENTED.AsInteger():
         desc = "Not Implemented";
@@ -314,6 +334,9 @@ bool FormatCHIPError(char * buf, uint16_t bufSize, CHIP_ERROR err)
     case CHIP_ERROR_FABRIC_EXISTS.AsInteger():
         desc = "Trying to add a NOC for a fabric that already exists";
         break;
+    case CHIP_ERROR_ENDPOINT_EXISTS.AsInteger():
+        desc = "Trying to add dynamic endpoint that already exists";
+        break;
     case CHIP_ERROR_WRONG_ENCRYPTION_TYPE_FROM_PEER.AsInteger():
         desc = "Wrong encryption type error code received from peer";
         break;
@@ -355,6 +378,9 @@ bool FormatCHIPError(char * buf, uint16_t bufSize, CHIP_ERROR err)
         break;
     case CHIP_ERROR_VERSION_MISMATCH.AsInteger():
         desc = "Version mismatch";
+        break;
+    case CHIP_ERROR_ACCESS_RESTRICTED_BY_ARL.AsInteger():
+        desc = "The CHIP message's access is restricted by ARL";
         break;
     case CHIP_EVENT_ID_FOUND.AsInteger():
         desc = "Event ID matching criteria was found";

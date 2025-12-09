@@ -16,13 +16,15 @@
  *    limitations under the License.
  */
 
+#pragma once
+
 #include <lib/core/NodeId.h>
 #include <lib/support/Span.h>
 
 namespace chip {
 namespace bdx {
 
-inline constexpr const char kScheme[] = "bdx://";
+inline constexpr char kScheme[] = "bdx://";
 
 /**
  * Parses the URI into NodeId and File Designator

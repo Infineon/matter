@@ -14,12 +14,19 @@
  *    See the License for the specific language governing permissions and
  *    limitations under the License.
  */
+#include <lib/core/OTAImageHeader.h>
 
-#include "OTAImageHeader.h"
-
-#include <lib/core/TLV.h>
+#include <lib/core/CHIPError.h>
+#include <lib/core/Optional.h>
+#include <lib/core/TLVReader.h>
+#include <lib/core/TLVTags.h>
+#include <lib/core/TLVTypes.h>
 #include <lib/support/BufferReader.h>
 #include <lib/support/CodeUtils.h>
+#include <lib/support/ScopedBuffer.h>
+#include <lib/support/Span.h>
+
+#include <string.h>
 
 namespace chip {
 
@@ -95,7 +102,7 @@ CHIP_ERROR OTAImageHeaderParser::AccumulateAndDecode(ByteSpan & buffer, OTAImage
 
 void OTAImageHeaderParser::Append(ByteSpan & buffer, uint32_t numBytes)
 {
-    numBytes = chip::min(numBytes, static_cast<uint32_t>(buffer.size()));
+    numBytes = std::min(numBytes, static_cast<uint32_t>(buffer.size()));
     memcpy(&mBuffer[mBufferOffset], buffer.data(), numBytes);
     mBufferOffset += numBytes;
     buffer = buffer.SubSpan(numBytes);
@@ -103,16 +110,16 @@ void OTAImageHeaderParser::Append(ByteSpan & buffer, uint32_t numBytes)
 
 CHIP_ERROR OTAImageHeaderParser::DecodeFixed()
 {
-    ReturnErrorCodeIf(mBufferOffset < kFixedHeaderSize, CHIP_ERROR_BUFFER_TOO_SMALL);
+    VerifyOrReturnError(mBufferOffset >= kFixedHeaderSize, CHIP_ERROR_BUFFER_TOO_SMALL);
 
     Encoding::LittleEndian::Reader reader(mBuffer.Get(), mBufferOffset);
     uint32_t fileIdentifier;
     uint64_t totalSize;
     ReturnErrorOnFailure(reader.Read32(&fileIdentifier).Read64(&totalSize).Read32(&mHeaderTlvSize).StatusCode());
-    ReturnErrorCodeIf(fileIdentifier != kOTAImageFileIdentifier, CHIP_ERROR_INVALID_FILE_IDENTIFIER);
+    VerifyOrReturnError(fileIdentifier == kOTAImageFileIdentifier, CHIP_ERROR_INVALID_FILE_IDENTIFIER);
     // Safety check against malicious headers.
-    ReturnErrorCodeIf(mHeaderTlvSize > kMaxHeaderSize, CHIP_ERROR_NO_MEMORY);
-    ReturnErrorCodeIf(!mBuffer.Alloc(mHeaderTlvSize), CHIP_ERROR_NO_MEMORY);
+    VerifyOrReturnError(mHeaderTlvSize <= kMaxHeaderSize, CHIP_ERROR_NO_MEMORY);
+    VerifyOrReturnError(mBuffer.Alloc(mHeaderTlvSize), CHIP_ERROR_NO_MEMORY);
 
     mState        = State::kTlv;
     mBufferOffset = 0;
@@ -122,7 +129,7 @@ CHIP_ERROR OTAImageHeaderParser::DecodeFixed()
 
 CHIP_ERROR OTAImageHeaderParser::DecodeTlv(OTAImageHeader & header)
 {
-    ReturnErrorCodeIf(mBufferOffset < mHeaderTlvSize, CHIP_ERROR_BUFFER_TOO_SMALL);
+    VerifyOrReturnError(mBufferOffset >= mHeaderTlvSize, CHIP_ERROR_BUFFER_TOO_SMALL);
 
     TLV::TLVReader tlvReader;
     tlvReader.Init(mBuffer.Get(), mBufferOffset);
@@ -139,7 +146,7 @@ CHIP_ERROR OTAImageHeaderParser::DecodeTlv(OTAImageHeader & header)
     ReturnErrorOnFailure(tlvReader.Get(header.mSoftwareVersion));
     ReturnErrorOnFailure(tlvReader.Next(TLV::ContextTag(Tag::kSoftwareVersionString)));
     ReturnErrorOnFailure(tlvReader.Get(header.mSoftwareVersionString));
-    ReturnErrorCodeIf(header.mSoftwareVersionString.size() > kMaxSoftwareVersionStringSize, CHIP_ERROR_INVALID_STRING_LENGTH);
+    VerifyOrReturnError(header.mSoftwareVersionString.size() <= kMaxSoftwareVersionStringSize, CHIP_ERROR_INVALID_STRING_LENGTH);
     ReturnErrorOnFailure(tlvReader.Next(TLV::ContextTag(Tag::kPayloadSize)));
     ReturnErrorOnFailure(tlvReader.Get(header.mPayloadSize));
     ReturnErrorOnFailure(tlvReader.Next());
@@ -159,11 +166,11 @@ CHIP_ERROR OTAImageHeaderParser::DecodeTlv(OTAImageHeader & header)
     if (tlvReader.GetTag() == TLV::ContextTag(Tag::kReleaseNotesURL))
     {
         ReturnErrorOnFailure(tlvReader.Get(header.mReleaseNotesURL));
-        ReturnErrorCodeIf(header.mReleaseNotesURL.size() > kMaxReleaseNotesURLSize, CHIP_ERROR_INVALID_STRING_LENGTH);
+        VerifyOrReturnError(header.mReleaseNotesURL.size() <= kMaxReleaseNotesURLSize, CHIP_ERROR_INVALID_STRING_LENGTH);
         ReturnErrorOnFailure(tlvReader.Next());
     }
 
-    VerifyOrReturnError(tlvReader.GetTag() == TLV::ContextTag(Tag::kImageDigestType), CHIP_ERROR_UNEXPECTED_TLV_ELEMENT);
+    ReturnErrorOnFailure(tlvReader.Expect(TLV::ContextTag(Tag::kImageDigestType)));
     ReturnErrorOnFailure(tlvReader.Get(header.mImageDigestType));
     ReturnErrorOnFailure(tlvReader.Next(TLV::ContextTag(Tag::kImageDigest)));
     ReturnErrorOnFailure(tlvReader.Get(header.mImageDigest));
